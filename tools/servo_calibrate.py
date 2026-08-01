@@ -256,6 +256,9 @@ def main():
                             break
                         seq += os.read(stdin_fd, 1).decode(errors="ignore")
                     key = {"[A": "up", "[B": "down", "[C": "right", "[D": "left"}.get(seq, "")
+                    print(f"\n[debug-kb] esc seq={seq!r} -> key={key!r}                    ")
+                else:
+                    print(f"\n[debug-kb] raw byte={ch!r} -> key={key!r}                    ")
 
                 if key == "q":
                     break

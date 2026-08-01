@@ -223,19 +223,22 @@ def main():
                             refresh_servo()
                         if abs_name in ("ABS_GAS", "ABS_BRAKE"):
                             apply_esc(esc_pulse_from_gas_brake(gas_value, brake_value))
-                    elif event.type == ecodes.EV_KEY and event.value == 1 and event.code == ecodes.BTN_A:
-                        if not test_mode:
-                            min_p, center_p, max_p = marks["min"], marks["center"], marks["max"]
-                            if min_p is None or center_p is None or max_p is None or max_p <= min_p:
-                                print(f"\nNu poti intra in TEST - marcheaza min/center/max intai (n/c/x).                              ")
+                    elif event.type == ecodes.EV_KEY and event.value == 1:
+                        key_name = ecodes.BTN.get(event.code, event.code)
+                        print(f"\n[debug] buton apasat: code={event.code} ({key_name})  BTN_A={ecodes.BTN_A}                    ")
+                        if event.code == ecodes.BTN_A:
+                            if not test_mode:
+                                min_p, center_p, max_p = marks["min"], marks["center"], marks["max"]
+                                if min_p is None or center_p is None or max_p is None or max_p <= min_p:
+                                    print(f"\nNu poti intra in TEST - marcheaza min/center/max intai (n/c/x).                              ")
+                                else:
+                                    test_min_p, test_center_p, test_max_p = min_p, center_p, max_p
+                                    test_mode = True
+                                    print(f"\n>>> TEST MODE: min={min_p}us center={center_p}us max={max_p}us <<<                              ")
                             else:
-                                test_min_p, test_center_p, test_max_p = min_p, center_p, max_p
-                                test_mode = True
-                                print(f"\n>>> TEST MODE: min={min_p}us center={center_p}us max={max_p}us <<<                              ")
-                        else:
-                            test_mode = False
-                            print("\n>>> SET MODE <<<                                                                        ")
-                        refresh_servo()
+                                test_mode = False
+                                print("\n>>> SET MODE <<<                                                                        ")
+                            refresh_servo()
 
             if stdin_fd in ready:
                 ch = os.read(stdin_fd, 1).decode(errors="ignore")

@@ -228,6 +228,67 @@ def compile_hef(model_name, push):
     return True
 
 
+# ── Smoke test - exercises the full export+compile pipeline (ONNX export,
+# Docker, Hailo DFC) in seconds instead of hours, with an untrained model.
+# Doesn't touch or overwrite any of your real named models. ────────────
+
+SMOKE_TEST_NAME = "smoketest"
+
+
+def run_smoke_test(config, push=None):
+    if push is None:
+        push = lambda e: print(e.get("text", e))
+
+    json_path = Path(config["json_path"])
+    if json_path.is_dir():
+        json_path = json_path / "driving_log.json"
+    if not json_path.exists():
+        push({"type": "log", "level": "error", "text": f"Not found: {json_path}"})
+        push({"type": "done"})
+        return
+
+    if not check_compile_prereqs(push):
+        push({"type": "done"})
+        return
+
+    with open(json_path) as f:
+        records = json.load(f)
+    data_root = json_path.parent
+    records = [r for r in records if (data_root / r["image_path"]).exists()]
+    if not records:
+        push({"type": "log", "level": "error", "text": "No valid images found in the dataset - need at least 1."})
+        push({"type": "done"})
+        return
+    push({"type": "log", "level": "info", "text": f"Using {min(5, len(records))} of {len(records)} images for calibration (untrained model - this only tests the pipeline, not accuracy)."})
+
+    MODELS_DIR.mkdir(exist_ok=True)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = build_model().to(device)  # random/pretrained-backbone weights, 0 epochs of fine-tuning
+    model.eval()
+
+    ckpt_path = MODELS_DIR / f"{SMOKE_TEST_NAME}.pth"
+    torch.save(model.state_dict(), ckpt_path)
+
+    onnx_path = MODELS_DIR / f"{SMOKE_TEST_NAME}.onnx"
+    push({"type": "log", "level": "info", "text": "Exporting ONNX..."})
+    export_onnx(model, device, onnx_path)
+    push({"type": "log", "level": "success", "text": "ONNX export OK."})
+
+    calib_path = MODELS_DIR / f"{SMOKE_TEST_NAME}_calib_data_nhwc.npy"
+    save_calibration_data(records, data_root, calib_path, n=5)
+
+    ok = compile_hef(SMOKE_TEST_NAME, push)
+    if ok:
+        onnx_path.unlink(missing_ok=True)
+        for tmp in [MODELS_DIR / f"{SMOKE_TEST_NAME}.har", MODELS_DIR / f"{SMOKE_TEST_NAME}_optimized.har"]:
+            tmp.unlink(missing_ok=True)
+        push({"type": "log", "level": "success",
+              "text": f"Pipeline OK end-to-end - models/{SMOKE_TEST_NAME}.hef compiled successfully. "
+                      f"(It's an untrained model - don't put it on the Pi, this was just to test the pipeline.)"})
+        push({"type": "file", "name": f"{SMOKE_TEST_NAME}.hef"})
+    push({"type": "done"})
+
+
 # ── Main entry point ────────────────────────────────────────────────────
 
 def run(config, push=None, should_stop=None):
@@ -314,7 +375,7 @@ def run(config, push=None, should_stop=None):
     push({"type": "log", "level": "info", "text": "Exporting ONNX..."})
     export_onnx(model, device, onnx_path)
 
-    calib_path = MODELS_DIR / "calib_data_nhwc.npy"
+    calib_path = MODELS_DIR / f"{model_name}_calib_data_nhwc.npy"
     push({"type": "log", "level": "info", "text": "Saving calibration data..."})
     save_calibration_data(records, data_root, calib_path)
 
@@ -326,7 +387,7 @@ def run(config, push=None, should_stop=None):
         push({"type": "file", "name": f"{model_name}.hef"})
     else:
         push({"type": "log", "level": "warning",
-              "text": f"Training succeeded (models/{model_name}.pth, .onnx, calib_data_nhwc.npy all saved) - "
+              "text": f"Training succeeded (models/{model_name}.pth, .onnx, {calib_path.name} all saved) - "
                       f"fix the compile issue above, then use 'Retry compile' with the same model name "
                       f"to finish without retraining."})
     push({"type": "done"})
@@ -343,7 +404,7 @@ def retry_compile(config, push=None):
     model_name = config.get("model_name", "model").strip() or "model"
     json_path_str = (config.get("json_path") or "").strip()
     onnx_path = MODELS_DIR / f"{model_name}.onnx"
-    calib_path = MODELS_DIR / "calib_data_nhwc.npy"
+    calib_path = MODELS_DIR / f"{model_name}_calib_data_nhwc.npy"
     ckpt_path = MODELS_DIR / f"{model_name}.pth"
 
     if not onnx_path.exists():

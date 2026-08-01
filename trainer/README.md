@@ -35,6 +35,14 @@ Training checks Docker + the DFC wheel are in place *before* starting -
 not after - so a missing wheel or a stopped Docker Desktop fails in a
 second instead of after a multi-hour training run.
 
+## Before a real (multi-hour) training run
+
+Click **"Test export (0 epochs)"** first - it runs an untrained model
+through the exact same ONNX export + Docker + Hailo DFC compile pipeline,
+in seconds. If your Docker/wheel/DFC setup is broken, this is where
+you'll find out - not after hours of training. It writes to
+`models/smoketest.*` and never touches your real named models.
+
 ## If the HEF compile step fails after training already finished
 
 Training already saved `models/<name>.pth` and `.onnx` - you do not need

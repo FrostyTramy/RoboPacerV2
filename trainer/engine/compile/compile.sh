@@ -9,7 +9,7 @@ NET_NAME=${1:-model}
 MODELS_DIR=/workspace/models
 ONNX_MODEL=$MODELS_DIR/${NET_NAME}.onnx
 HAR_FILE=$MODELS_DIR/${NET_NAME}.har
-CALIB_NHWC=$MODELS_DIR/calib_data_nhwc.npy
+CALIB_NHWC=$MODELS_DIR/${NET_NAME}_calib_data_nhwc.npy
 OPT_HAR=$MODELS_DIR/${NET_NAME}_optimized.har
 HW_ARCH=hailo8
 

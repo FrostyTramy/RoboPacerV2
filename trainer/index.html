@@ -47,6 +47,7 @@
   <button id="startBtn" onclick="startTraining()">Start Training</button>
   <button id="stopBtn" onclick="stopTraining()" disabled>Stop</button>
   <button id="compileBtn" onclick="compileOnly()" title="Recompile to HEF from an existing models/&lt;name&gt;.onnx - no retraining. Use this after fixing a Docker/DFC error.">Retry compile (no retrain)</button>
+  <button id="smoketestBtn" onclick="smokeTest()" title="0-epoch run through the full pipeline (ONNX export + Docker + Hailo compile) with an untrained model - seconds, not hours. Doesn't touch your real models.">Test export (0 epochs)</button>
   <div id="progress"><div id="progressBar"></div></div>
 </div>
 
@@ -69,18 +70,21 @@ function logLine(text, level) {
 }
 
 const compileBtn = document.getElementById("compileBtn");
+const smoketestBtn = document.getElementById("smoketestBtn");
 
 async function refreshStatus() {
   const r = await fetch("/api/status");
   const data = await r.json();
   startBtn.disabled = data.running;
   compileBtn.disabled = data.running;
+  smoketestBtn.disabled = data.running;
   stopBtn.disabled = !data.running;
 }
 
 function attachStream() {
   startBtn.disabled = true;
   compileBtn.disabled = true;
+  smoketestBtn.disabled = true;
   stopBtn.disabled = false;
 
   const stream = new EventSource("/api/stream");
@@ -141,6 +145,27 @@ async function compileOnly() {
   logLine(`Recompiling ${config.model_name} from existing .onnx (no retraining)...`, "info");
 
   const res = await fetch("/api/compile", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(config),
+  });
+  if (!res.ok) {
+    const err = await res.json();
+    logLine("Error: " + (err.error || res.statusText), "error");
+    return;
+  }
+  attachStream();
+}
+
+async function smokeTest() {
+  const config = { json_path: document.getElementById("jsonPath").value.trim() };
+  if (!config.json_path) { alert("Set the dataset folder or driving_log.json path first."); return; }
+
+  logEl.innerHTML = "";
+  progressBar.style.width = "0%";
+  logLine("Running 0-epoch pipeline test (untrained model - just checking export/Docker/compile work)...", "info");
+
+  const res = await fetch("/api/smoketest", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(config),

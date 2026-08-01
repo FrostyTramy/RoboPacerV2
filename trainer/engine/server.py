@@ -104,6 +104,38 @@ def compile_only():
     return jsonify({"status": "started"})
 
 
+@app.route("/api/smoketest", methods=["POST"])
+def smoketest():
+    """0-epoch run through the full pipeline (ONNX export + Docker + Hailo
+    compile) with an untrained model - takes seconds, not hours, to catch
+    export/Docker/DFC problems. Never touches your real named models."""
+    global _running, _events, _stop_requested
+    import train as train_module
+
+    with _lock:
+        if _running:
+            return jsonify({"error": "A job is already running."}), 409
+        config = request.json or {}
+        if not config.get("json_path"):
+            return jsonify({"error": "json_path is required."}), 400
+        _running = True
+        _stop_requested = False
+        _events = []
+
+    def worker():
+        global _running
+        try:
+            train_module.run_smoke_test(config, _push)
+        except Exception:
+            _push({"type": "log", "level": "error", "text": traceback.format_exc()})
+            _push({"type": "done"})
+        finally:
+            _running = False
+
+    threading.Thread(target=worker, daemon=True).start()
+    return jsonify({"status": "started"})
+
+
 @app.route("/api/stop", methods=["POST"])
 def stop():
     global _stop_requested

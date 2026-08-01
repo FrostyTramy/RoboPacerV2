@@ -109,12 +109,12 @@ ANALOGUE_GAIN = 12.0
 # Steering (servo on PCA9685 channel 0) - identical to data_recorder.py
 # ---------------------------------------------------------------------------
 SERVO_CHANNEL = 0
-SERVO_MIN_PULSE = 800
-SERVO_MAX_PULSE = 2400
+SERVO_MIN_PULSE = 900
+SERVO_MAX_PULSE = 2200
 SERVO_MIN_ANGLE = 45
 SERVO_MAX_ANGLE = 135
 SERVO_NEUTRAL_ANGLE = 90
-SERVO_OFFSET = 3
+SERVO_OFFSET = 4
 
 # ---------------------------------------------------------------------------
 # Throttle (ESC on PCA9685 channel 1) - pulse widths in microseconds,

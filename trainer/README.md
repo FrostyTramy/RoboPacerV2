@@ -31,6 +31,17 @@ model name / epochs / batch size, click Start. Training runs natively
 Copy the `.hef` onto the Pi, into `main/`, next to `main.py` (exactly one
 `.hef` file must be in that folder).
 
+Training checks Docker + the DFC wheel are in place *before* starting -
+not after - so a missing wheel or a stopped Docker Desktop fails in a
+second instead of after a multi-hour training run.
+
+## If the HEF compile step fails after training already finished
+
+Training already saved `models/<name>.pth` and `.onnx` - you do not need
+to retrain. Fix whatever Docker/DFC issue caused the failure, then click
+**"Retry compile (no retrain)"** with the same model name - it recompiles
+straight from the existing `.onnx` and calibration data.
+
 ## Why the preprocessing looks the way it does
 
 `engine/train.py`'s `load_and_preprocess()` / `SteeringDataset` intentionally

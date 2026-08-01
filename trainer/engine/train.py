@@ -164,13 +164,27 @@ def save_calibration_data(records, data_root, out_path, n=CALIB_N):
 
 # ── Docker HEF compilation ──────────────────────────────────────────────
 
-def compile_hef(model_name, push):
-    push({"type": "log", "level": "info", "text": "Checking Docker..."})
+DFC_WHEEL_PATH = ENGINE_DIR / "compile" / "resources" / "hailo_dataflow_compiler-3.34.0-py3-none-linux_x86_64.whl"
+
+
+def check_compile_prereqs(push):
+    """Checked BEFORE training starts, not after - a missing wheel or a
+    stopped Docker Desktop should fail in a second, not after a training
+    run that can take hours."""
+    ok = True
     r = subprocess.run(["docker", "info"], capture_output=True)
     if r.returncode != 0:
         push({"type": "log", "level": "error", "text": "Docker is not running - start Docker Desktop first."})
-        return False
+        ok = False
+    if not DFC_WHEEL_PATH.exists():
+        push({"type": "log", "level": "error",
+              "text": f"Hailo DFC wheel not found at {DFC_WHEEL_PATH}. "
+                      f"Download it from the Hailo Developer Zone and place it there (see README.md)."})
+        ok = False
+    return ok
 
+
+def compile_hef(model_name, push):
     push({"type": "log", "level": "info", "text": "Building hailo-dfc image (cached after first run)..."})
     build = subprocess.Popen(
         ["docker", "build", "--progress=plain", "-t", "hailo-dfc",
@@ -226,6 +240,12 @@ def run(config, push=None, should_stop=None):
 
     if not json_path.exists():
         push({"type": "log", "level": "error", "text": f"Not found: {json_path}"})
+        return
+
+    if not check_compile_prereqs(push):
+        push({"type": "log", "level": "error",
+              "text": "Fix the above before starting - training can take hours and "
+                      "the HEF compile step needs these to be in place."})
         return
 
     random.seed(42)
@@ -288,10 +308,78 @@ def run(config, push=None, should_stop=None):
     save_calibration_data(records, data_root, calib_path)
 
     ok = compile_hef(model_name, push)
-    onnx_path.unlink(missing_ok=True)
-    for tmp in [MODELS_DIR / f"{model_name}.har", MODELS_DIR / f"{model_name}_optimized.har"]:
-        tmp.unlink(missing_ok=True)
     if ok:
+        onnx_path.unlink(missing_ok=True)
+        for tmp in [MODELS_DIR / f"{model_name}.har", MODELS_DIR / f"{model_name}_optimized.har"]:
+            tmp.unlink(missing_ok=True)
+        push({"type": "file", "name": f"{model_name}.hef"})
+    else:
+        push({"type": "log", "level": "warning",
+              "text": f"Training succeeded (models/{model_name}.pth, .onnx, calib_data_nhwc.npy all saved) - "
+                      f"fix the compile issue above, then use 'Retry compile' with the same model name "
+                      f"to finish without retraining."})
+    push({"type": "done"})
+
+
+def retry_compile(config, push=None):
+    """Recompiles an already-trained model to HEF, reusing the .onnx and
+    calibration data saved by a previous run() call - skips training
+    entirely. Use this after fixing a Docker/DFC problem so a failed
+    compile doesn't mean redoing hours of training."""
+    if push is None:
+        push = lambda e: print(e.get("text", e))
+
+    model_name = config.get("model_name", "model").strip() or "model"
+    json_path_str = (config.get("json_path") or "").strip()
+    onnx_path = MODELS_DIR / f"{model_name}.onnx"
+    calib_path = MODELS_DIR / "calib_data_nhwc.npy"
+    ckpt_path = MODELS_DIR / f"{model_name}.pth"
+
+    if not onnx_path.exists():
+        if not ckpt_path.exists():
+            push({"type": "log", "level": "error",
+                  "text": f"Neither {onnx_path} nor {ckpt_path} exist - nothing to compile, run training first."})
+            push({"type": "done"})
+            return
+        push({"type": "log", "level": "warning", "text": f"{onnx_path} missing - re-exporting from {ckpt_path.name}..."})
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model = build_model().to(device)
+        model.load_state_dict(torch.load(ckpt_path, map_location=device))
+        model.eval()
+        export_onnx(model, device, onnx_path)
+        push({"type": "log", "level": "success", "text": "Re-exported ONNX."})
+
+    if not calib_path.exists():
+        if not json_path_str:
+            push({"type": "log", "level": "error",
+                  "text": f"{calib_path} missing and no dataset path given - set the dataset "
+                          f"folder field and retry to regenerate calibration data."})
+            push({"type": "done"})
+            return
+        json_path = Path(json_path_str)
+        if json_path.is_dir():
+            json_path = json_path / "driving_log.json"
+        if not json_path.exists():
+            push({"type": "log", "level": "error", "text": f"Not found: {json_path}"})
+            push({"type": "done"})
+            return
+        push({"type": "log", "level": "warning", "text": "Calibration data missing - regenerating..."})
+        with open(json_path) as f:
+            records = json.load(f)
+        data_root = json_path.parent
+        records = [r for r in records if (data_root / r["image_path"]).exists()]
+        save_calibration_data(records, data_root, calib_path)
+        push({"type": "log", "level": "success", "text": "Regenerated calibration data."})
+
+    if not check_compile_prereqs(push):
+        push({"type": "done"})
+        return
+
+    ok = compile_hef(model_name, push)
+    if ok:
+        onnx_path.unlink(missing_ok=True)
+        for tmp in [MODELS_DIR / f"{model_name}.har", MODELS_DIR / f"{model_name}_optimized.har"]:
+            tmp.unlink(missing_ok=True)
         push({"type": "file", "name": f"{model_name}.hef"})
     push({"type": "done"})
 

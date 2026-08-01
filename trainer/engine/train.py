@@ -224,6 +224,19 @@ def compile_hef(model_name, push):
         push({"type": "log", "level": "error", "text": "DFC compilation failed."})
         return False
 
+    hef_path = MODELS_DIR / f"{model_name}.hef"
+    if not hef_path.exists():
+        # compile.sh exiting 0 doesn't guarantee it worked - `set -e` only
+        # stops the script if the shell actually parses it correctly (e.g.
+        # CRLF line endings from a Windows checkout can silently break
+        # that, letting every step after a failure keep running and still
+        # print "SUCCESS"). Trust the actual file, not the exit code.
+        push({"type": "log", "level": "error",
+              "text": f"compile.sh exited 0 but {hef_path} was never created - "
+                      f"check the docker log above for the real error (often a CRLF "
+                      f"line-ending issue in compile.sh on Windows checkouts)."})
+        return False
+
     push({"type": "log", "level": "success", "text": f"HEF ready: models/{model_name}.hef"})
     return True
 

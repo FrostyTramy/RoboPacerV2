@@ -1,0 +1,12 @@
+# Shell scripts run inside a Linux Docker container - CRLF line endings
+# (which Windows Git checkouts can introduce) break bash there in
+# confusing ways (stray \r in every variable/argument). Force LF
+# regardless of the checkout platform's core.autocrlf setting.
+*.sh text eol=lf
+
+# Keep Windows batch files as CRLF (native/expected there).
+*.bat text eol=crlf
+
+*.py text eol=lf
+*.md text eol=lf
+Dockerfile text eol=lf

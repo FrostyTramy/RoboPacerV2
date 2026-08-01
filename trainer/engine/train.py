@@ -141,6 +141,16 @@ def _eval_epoch(model, loader, device):
 # ── ONNX export ─────────────────────────────────────────────────────────
 
 def export_onnx(model, device, path):
+    """
+    dynamo=False forces the old TorchScript-based exporter, which honors
+    opset_version directly. Without it, newer PyTorch (2.5+) defaults to
+    the torch.export-based "dynamo" exporter, which only emits opset 18
+    and then tries to auto-downgrade to our requested opset 13 - that
+    downgrade path has a known bug in onnx's version converter that fails
+    on ResNet's Resize/pooling ops ("No initializer or constant input to
+    node found"). The Hailo DFC (3.34.0) needs opset 13, so we go through
+    the old exporter instead of fighting the downgrade converter.
+    """
     model.eval()
     dummy = torch.zeros(1, 3, IMG_SIZE, IMG_SIZE, device=device)
     torch.onnx.export(
@@ -148,6 +158,7 @@ def export_onnx(model, device, path):
         export_params=True, opset_version=13, do_constant_folding=True,
         input_names=["input"], output_names=["steering"],
         dynamic_axes={"input": {0: "batch"}, "steering": {0: "batch"}},
+        dynamo=False,
     )
 
 

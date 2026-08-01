@@ -43,6 +43,7 @@ POLL_INTERVAL=0.3
 ALLOWED_SCRIPTS=(
     "/home/pi/RoboPacerV2/data_recorder/data_recorder.py"
     "/home/pi/RoboPacerV2/main/main.py"
+    "/home/pi/RoboPacerV2/tools/servo_calibrate.py"
 )
 
 # --- Functions ----------------------------------------------------------

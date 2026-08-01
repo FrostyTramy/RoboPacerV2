@@ -11,7 +11,10 @@ servo changes (e.g. swapping to an MG958) instead of reusing the old
 servo's calibration values blindly - different servo models/units don't
 necessarily share the same pulse-to-angle mapping or mechanical center.
 
-Controls:
+Two modes:
+
+  SET mode (default) - only the keyboard touches the servo. The Xbox
+  stick is ignored for steering entirely here.
     Up / w      increase servo pulse (steering trim) by <step>
     Down / s    decrease servo pulse (steering trim) by <step>
     Right / d   increase step size
@@ -20,23 +23,20 @@ Controls:
     n           mark current pulse as MIN endpoint
     x           mark current pulse as MAX endpoint
     r           reset steering to the safe default (1500us)
-    q           quit and print a summary + ready-to-paste constants
+    A           switch to TEST mode (needs min/center/max all marked)
 
-    Xbox right trigger (ABS_GAS)    throttle forward
-    Xbox left trigger (ABS_BRAKE)   brake/reverse
-    Xbox left stick X (ABS_X)       steering - deflects around whatever
-                                     the keyboard-set pulse (trim/center)
-                                     currently is, same deadzone as
-                                     data_recorder.py, so it drives like
-                                     the real thing while you dial in trim
-    A                               toggle TEST mode - locks in the
-                                     current min/center/max marks and
-                                     drives the steering exactly the way
-                                     data_recorder.py/main.py would with
-                                     those values (through the real angle
-                                     math, not the generic trim range).
-                                     Press A again to go back to SET mode
-                                     and keep adjusting with the keyboard.
+  TEST mode - only the Xbox stick touches the servo, driven through the
+  exact angle math data_recorder.py/main.py use with your marked values
+  (SERVO_OFFSET derived from them, deadzone, angle->pulse). Keyboard
+  calibration keys do nothing here - go back to SET to keep adjusting.
+    Xbox left stick X (ABS_X)      steering
+    A                               switch back to SET mode
+
+  In both modes:
+    Xbox right trigger (ABS_GAS)   throttle forward
+    Xbox left trigger (ABS_BRAKE)  brake/reverse
+    q                               quit and print a summary +
+                                     ready-to-paste constants
 
 Safety: steering pulse is hard-clamped to 500-2500us the whole time, a
 range that essentially every hobby RC servo can handle without straining
@@ -82,7 +82,6 @@ ESC_MAX_US = 1700
 
 AXIS_MAX = 65535  # must match AXIS_MAX in data_recorder/data_recorder.py
 STEERING_DEADZONE = 0.2  # must match LABEL_DEADZONE in data_recorder/data_recorder.py
-STEERING_HALF_RANGE_US = (PULSE_HARD_MAX_US - PULSE_HARD_MIN_US) / 2  # full stick throw either side of trim
 
 # Same fixed angle range data_recorder.py/main.py use - only SERVO_OFFSET
 # (derived from your min/center/max marks) and the calibrated min/max
@@ -111,20 +110,6 @@ def esc_pulse_from_gas_brake(gas_value, brake_value):
     brake_offset = -(brake_value / 1023.0) * (ESC_NEUTRAL_US - ESC_MIN_US)
     pulse = ESC_NEUTRAL_US + gas_offset + brake_offset
     return max(ESC_MIN_US, min(ESC_MAX_US, int(pulse)))
-
-
-def steering_pulse_from_axis(x_value, trim_pulse):
-    """Same deadzone-rescale shape as data_recorder.py's steering_axis_to_angle,
-    but in raw pulse microseconds around the live keyboard trim instead of
-    around a fixed servo angle - so 'center' here is whatever you're
-    currently dialing in, not a hardcoded value."""
-    raw = x_value / AXIS_MAX * 2.0 - 1.0  # 0..AXIS_MAX -> -1..1
-    if abs(raw) <= STEERING_DEADZONE:
-        norm = 0.0
-    else:
-        sign = 1.0 if raw > 0 else -1.0
-        norm = sign * (abs(raw) - STEERING_DEADZONE) / (1.0 - STEERING_DEADZONE)
-    return trim_pulse - norm * STEERING_HALF_RANGE_US
 
 
 def steering_angle_from_axis(x_value, offset):
@@ -183,10 +168,14 @@ def main():
 
     def refresh_servo():
         if test_mode:
+            # Only the stick drives the servo here - keyboard trim (`pulse`)
+            # is not involved at all in TEST mode.
             angle = steering_angle_from_axis(steering_axis_raw, test_offset)
             apply_servo(angle_to_pulse(angle, test_min_p, test_max_p))
         else:
-            apply_servo(steering_pulse_from_axis(steering_axis_raw, pulse))
+            # Only the keyboard drives the servo here - the stick is
+            # ignored entirely in SET mode.
+            apply_servo(pulse)
 
     refresh_servo()
 
@@ -220,8 +209,7 @@ def main():
                 print(f"\r[TEST] min={test_min_p}us max={test_max_p}us offset={test_offset}  applied={applied:4.0f}us  gas={gas_value:4d}   (A = back to SET)          ",
                       end="", flush=True)
             else:
-                applied = steering_pulse_from_axis(steering_axis_raw, pulse)
-                print(f"\r[SET] trim={pulse:4d}us  applied={applied:4.0f}us  step={step:3d}us  marked: {marked}  gas={gas_value:4d}          ",
+                print(f"\r[SET] pulse={pulse:4d}us  step={step:3d}us  marked: {marked}  gas={gas_value:4d}          ",
                       end="", flush=True)
 
             wait_fds = [stdin_fd] + ([controller_fd] if controller_fd is not None else [])

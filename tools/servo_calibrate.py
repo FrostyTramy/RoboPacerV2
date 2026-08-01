@@ -24,6 +24,11 @@ Controls:
 
     Xbox right trigger (ABS_GAS)    throttle forward
     Xbox left trigger (ABS_BRAKE)   brake/reverse
+    Xbox left stick X (ABS_X)       steering - deflects around whatever
+                                     the keyboard-set pulse (trim/center)
+                                     currently is, same deadzone as
+                                     data_recorder.py, so it drives like
+                                     the real thing while you dial in trim
 
 Safety: steering pulse is hard-clamped to 500-2500us the whole time, a
 range that essentially every hobby RC servo can handle without straining
@@ -67,6 +72,10 @@ ESC_NEUTRAL_US = 1500
 ESC_MIN_US = 1000
 ESC_MAX_US = 1700
 
+AXIS_MAX = 65535  # must match AXIS_MAX in data_recorder/data_recorder.py
+STEERING_DEADZONE = 0.2  # must match LABEL_DEADZONE in data_recorder/data_recorder.py
+STEERING_HALF_RANGE_US = (PULSE_HARD_MAX_US - PULSE_HARD_MIN_US) / 2  # full stick throw either side of trim
+
 
 def find_xbox_controller():
     for path in list_devices():
@@ -87,6 +96,20 @@ def esc_pulse_from_gas_brake(gas_value, brake_value):
     brake_offset = -(brake_value / 1023.0) * (ESC_NEUTRAL_US - ESC_MIN_US)
     pulse = ESC_NEUTRAL_US + gas_offset + brake_offset
     return max(ESC_MIN_US, min(ESC_MAX_US, int(pulse)))
+
+
+def steering_pulse_from_axis(x_value, trim_pulse):
+    """Same deadzone-rescale shape as data_recorder.py's steering_axis_to_angle,
+    but in raw pulse microseconds around the live keyboard trim instead of
+    around a fixed servo angle - so 'center' here is whatever you're
+    currently dialing in, not a hardcoded value."""
+    raw = x_value / AXIS_MAX * 2.0 - 1.0  # 0..AXIS_MAX -> -1..1
+    if abs(raw) <= STEERING_DEADZONE:
+        norm = 0.0
+    else:
+        sign = 1.0 if raw > 0 else -1.0
+        norm = sign * (abs(raw) - STEERING_DEADZONE) / (1.0 - STEERING_DEADZONE)
+    return trim_pulse - norm * STEERING_HALF_RANGE_US
 
 
 def _handle_sigterm(signum, frame):
@@ -118,7 +141,12 @@ def main():
     pulse = DEFAULT_PULSE_US
     step_index = 2  # STEP_SIZES_US[2] == 10us
     marks = {"min": None, "center": None, "max": None}
-    apply_servo(pulse)
+    steering_axis_raw = AXIS_MAX / 2
+
+    def refresh_servo():
+        apply_servo(steering_pulse_from_axis(steering_axis_raw, pulse))
+
+    refresh_servo()
 
     controller = find_xbox_controller()
     controller_fd = None
@@ -144,7 +172,8 @@ def main():
         while True:
             step = STEP_SIZES_US[step_index]
             marked = ", ".join(f"{k}={v}us" for k, v in marks.items() if v is not None) or "none yet"
-            print(f"\rservo={pulse:4d}us  step={step:3d}us  marked: {marked}  gas={gas_value:4d}          ",
+            applied = steering_pulse_from_axis(steering_axis_raw, pulse)
+            print(f"\rtrim={pulse:4d}us  applied={applied:4.0f}us  step={step:3d}us  marked: {marked}  gas={gas_value:4d}          ",
                   end="", flush=True)
 
             wait_fds = [stdin_fd] + ([controller_fd] if controller_fd is not None else [])
@@ -158,6 +187,9 @@ def main():
                             gas_value = event.value
                         elif abs_name == "ABS_BRAKE":
                             brake_value = event.value
+                        elif abs_name == "ABS_X":
+                            steering_axis_raw = event.value
+                            refresh_servo()
                         if abs_name in ("ABS_GAS", "ABS_BRAKE"):
                             apply_esc(esc_pulse_from_gas_brake(gas_value, brake_value))
 
@@ -194,7 +226,7 @@ def main():
                     continue
 
                 pulse = max(PULSE_HARD_MIN_US, min(PULSE_HARD_MAX_US, pulse))
-                apply_servo(pulse)
+                refresh_servo()
 
     except KeyboardInterrupt:
         pass

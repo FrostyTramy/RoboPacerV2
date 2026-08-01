@@ -29,6 +29,14 @@ Controls:
                                      currently is, same deadzone as
                                      data_recorder.py, so it drives like
                                      the real thing while you dial in trim
+    A                               toggle TEST mode - locks in the
+                                     current min/center/max marks and
+                                     drives the steering exactly the way
+                                     data_recorder.py/main.py would with
+                                     those values (through the real angle
+                                     math, not the generic trim range).
+                                     Press A again to go back to SET mode
+                                     and keep adjusting with the keyboard.
 
 Safety: steering pulse is hard-clamped to 500-2500us the whole time, a
 range that essentially every hobby RC servo can handle without straining
@@ -76,6 +84,13 @@ AXIS_MAX = 65535  # must match AXIS_MAX in data_recorder/data_recorder.py
 STEERING_DEADZONE = 0.2  # must match LABEL_DEADZONE in data_recorder/data_recorder.py
 STEERING_HALF_RANGE_US = (PULSE_HARD_MAX_US - PULSE_HARD_MIN_US) / 2  # full stick throw either side of trim
 
+# Same fixed angle range data_recorder.py/main.py use - only SERVO_OFFSET
+# (derived from your min/center/max marks) and the calibrated min/max
+# pulses change in TEST mode; these don't.
+SERVO_MIN_ANGLE = 45
+SERVO_MAX_ANGLE = 135
+SERVO_NEUTRAL_ANGLE = 90
+
 
 def find_xbox_controller():
     for path in list_devices():
@@ -112,6 +127,24 @@ def steering_pulse_from_axis(x_value, trim_pulse):
     return trim_pulse - norm * STEERING_HALF_RANGE_US
 
 
+def steering_angle_from_axis(x_value, offset):
+    """Identical shape to data_recorder.py's steering_axis_to_angle."""
+    raw = 1.0 - (x_value / AXIS_MAX) * 2.0  # 0..AXIS_MAX -> 1..-1
+    if abs(raw) <= STEERING_DEADZONE:
+        norm = 0.0
+    else:
+        sign = 1.0 if raw > 0 else -1.0
+        norm = sign * (abs(raw) - STEERING_DEADZONE) / (1.0 - STEERING_DEADZONE)
+    angle = SERVO_NEUTRAL_ANGLE + norm * (SERVO_MAX_ANGLE - SERVO_NEUTRAL_ANGLE) + offset
+    return max(SERVO_MIN_ANGLE, min(SERVO_MAX_ANGLE, angle))
+
+
+def angle_to_pulse(angle, min_p, max_p):
+    """Same linear angle->pulse mapping adafruit_motor.servo.Servo does
+    internally (actuation_range=180, which is its default)."""
+    return min_p + (angle / 180.0) * (max_p - min_p)
+
+
 def _handle_sigterm(signum, frame):
     """See data_recorder.py's identical handler - without this, SIGTERM
     skips the `finally` block below and leaves the ESC at its last pulse."""
@@ -143,8 +176,17 @@ def main():
     marks = {"min": None, "center": None, "max": None}
     steering_axis_raw = AXIS_MAX / 2
 
+    test_mode = False
+    test_offset = 0
+    test_min_p = None
+    test_max_p = None
+
     def refresh_servo():
-        apply_servo(steering_pulse_from_axis(steering_axis_raw, pulse))
+        if test_mode:
+            angle = steering_angle_from_axis(steering_axis_raw, test_offset)
+            apply_servo(angle_to_pulse(angle, test_min_p, test_max_p))
+        else:
+            apply_servo(steering_pulse_from_axis(steering_axis_raw, pulse))
 
     refresh_servo()
 
@@ -172,9 +214,15 @@ def main():
         while True:
             step = STEP_SIZES_US[step_index]
             marked = ", ".join(f"{k}={v}us" for k, v in marks.items() if v is not None) or "none yet"
-            applied = steering_pulse_from_axis(steering_axis_raw, pulse)
-            print(f"\rtrim={pulse:4d}us  applied={applied:4.0f}us  step={step:3d}us  marked: {marked}  gas={gas_value:4d}          ",
-                  end="", flush=True)
+            if test_mode:
+                angle = steering_angle_from_axis(steering_axis_raw, test_offset)
+                applied = angle_to_pulse(angle, test_min_p, test_max_p)
+                print(f"\r[TEST] min={test_min_p}us max={test_max_p}us offset={test_offset}  applied={applied:4.0f}us  gas={gas_value:4d}   (A = back to SET)          ",
+                      end="", flush=True)
+            else:
+                applied = steering_pulse_from_axis(steering_axis_raw, pulse)
+                print(f"\r[SET] trim={pulse:4d}us  applied={applied:4.0f}us  step={step:3d}us  marked: {marked}  gas={gas_value:4d}          ",
+                      end="", flush=True)
 
             wait_fds = [stdin_fd] + ([controller_fd] if controller_fd is not None else [])
             ready, _, _ = select.select(wait_fds, [], [], 0.05)
@@ -192,6 +240,20 @@ def main():
                             refresh_servo()
                         if abs_name in ("ABS_GAS", "ABS_BRAKE"):
                             apply_esc(esc_pulse_from_gas_brake(gas_value, brake_value))
+                    elif event.type == ecodes.EV_KEY and event.value == 1 and event.code == ecodes.BTN_A:
+                        if not test_mode:
+                            min_p, center_p, max_p = marks["min"], marks["center"], marks["max"]
+                            if min_p is None or center_p is None or max_p is None or max_p <= min_p:
+                                print(f"\nNu poti intra in TEST - marcheaza min/center/max intai (n/c/x).                              ")
+                            else:
+                                test_min_p, test_max_p = min_p, max_p
+                                test_offset = round((center_p - min_p) / (max_p - min_p) * 180 - 90)
+                                test_mode = True
+                                print(f"\n>>> TEST MODE: min={min_p}us center={center_p}us max={max_p}us (offset={test_offset}) <<<                              ")
+                        else:
+                            test_mode = False
+                            print("\n>>> SET MODE <<<                                                                        ")
+                        refresh_servo()
 
             if stdin_fd in ready:
                 ch = os.read(stdin_fd, 1).decode(errors="ignore")
@@ -203,6 +265,11 @@ def main():
                         key = {"[A": "up", "[B": "down", "[C": "right", "[D": "left"}.get(seq, "")
                     else:
                         key = ""
+
+                if key == "q":
+                    break
+                elif test_mode:
+                    continue  # calibration keys are ignored while TEST mode is active
 
                 if key in ("up", "w"):
                     pulse += step
@@ -220,8 +287,6 @@ def main():
                     marks["max"] = pulse
                 elif key == "r":
                     pulse = DEFAULT_PULSE_US
-                elif key == "q":
-                    break
                 else:
                     continue
 

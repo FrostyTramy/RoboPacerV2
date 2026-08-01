@@ -25,10 +25,13 @@ Two modes:
     r           reset steering to the safe default (1500us)
     A           switch to TEST mode (needs min/center/max all marked)
 
-  TEST mode - only the Xbox stick touches the servo, driven through the
-  exact angle math data_recorder.py/main.py use with your marked values
-  (SERVO_OFFSET derived from them, deadzone, angle->pulse). Keyboard
-  calibration keys do nothing here - go back to SET to keep adjusting.
+  TEST mode - only the Xbox stick touches the servo, mapped directly to
+  your marked values: centered = exactly your CENTER mark, full deflection
+  either way = exactly your MIN/MAX mark (same deadzone shape as
+  data_recorder.py, applied directly in pulse space - full stick throw
+  reaches the physical endpoints you marked, unlike the real system's
+  45-135deg safety-clamped angle range). Keyboard calibration keys do
+  nothing here - go back to SET to keep adjusting.
     Xbox left stick X (ABS_X)      steering
     A                               switch back to SET mode
 
@@ -83,13 +86,6 @@ ESC_MAX_US = 1700
 AXIS_MAX = 65535  # must match AXIS_MAX in data_recorder/data_recorder.py
 STEERING_DEADZONE = 0.2  # must match LABEL_DEADZONE in data_recorder/data_recorder.py
 
-# Same fixed angle range data_recorder.py/main.py use - only SERVO_OFFSET
-# (derived from your min/center/max marks) and the calibrated min/max
-# pulses change in TEST mode; these don't.
-SERVO_MIN_ANGLE = 45
-SERVO_MAX_ANGLE = 135
-SERVO_NEUTRAL_ANGLE = 90
-
 
 def find_xbox_controller():
     for path in list_devices():
@@ -112,22 +108,23 @@ def esc_pulse_from_gas_brake(gas_value, brake_value):
     return max(ESC_MIN_US, min(ESC_MAX_US, int(pulse)))
 
 
-def steering_angle_from_axis(x_value, offset):
-    """Identical shape to data_recorder.py's steering_axis_to_angle."""
+def steering_pulse_test(x_value, min_p, center_p, max_p):
+    """Direct 3-point mapping using your exact marked values: stick
+    centered -> exactly center_p, full deflection either way -> exactly
+    min_p/max_p. Deliberately NOT the same as data_recorder.py/main.py's
+    angle math (which clamps to a 45-135 deg safety margin and so never
+    actually reaches the physical endpoints you marked) - this is for
+    testing the calibration points themselves, full throw included."""
     raw = 1.0 - (x_value / AXIS_MAX) * 2.0  # 0..AXIS_MAX -> 1..-1
     if abs(raw) <= STEERING_DEADZONE:
         norm = 0.0
     else:
         sign = 1.0 if raw > 0 else -1.0
         norm = sign * (abs(raw) - STEERING_DEADZONE) / (1.0 - STEERING_DEADZONE)
-    angle = SERVO_NEUTRAL_ANGLE + norm * (SERVO_MAX_ANGLE - SERVO_NEUTRAL_ANGLE) + offset
-    return max(SERVO_MIN_ANGLE, min(SERVO_MAX_ANGLE, angle))
-
-
-def angle_to_pulse(angle, min_p, max_p):
-    """Same linear angle->pulse mapping adafruit_motor.servo.Servo does
-    internally (actuation_range=180, which is its default)."""
-    return min_p + (angle / 180.0) * (max_p - min_p)
+    if norm >= 0:
+        return center_p + norm * (max_p - center_p)
+    else:
+        return center_p + norm * (center_p - min_p)
 
 
 def _handle_sigterm(signum, frame):
@@ -162,16 +159,15 @@ def main():
     steering_axis_raw = AXIS_MAX / 2
 
     test_mode = False
-    test_offset = 0
     test_min_p = None
+    test_center_p = None
     test_max_p = None
 
     def refresh_servo():
         if test_mode:
             # Only the stick drives the servo here - keyboard trim (`pulse`)
             # is not involved at all in TEST mode.
-            angle = steering_angle_from_axis(steering_axis_raw, test_offset)
-            apply_servo(angle_to_pulse(angle, test_min_p, test_max_p))
+            apply_servo(steering_pulse_test(steering_axis_raw, test_min_p, test_center_p, test_max_p))
         else:
             # Only the keyboard drives the servo here - the stick is
             # ignored entirely in SET mode.
@@ -204,9 +200,8 @@ def main():
             step = STEP_SIZES_US[step_index]
             marked = ", ".join(f"{k}={v}us" for k, v in marks.items() if v is not None) or "none yet"
             if test_mode:
-                angle = steering_angle_from_axis(steering_axis_raw, test_offset)
-                applied = angle_to_pulse(angle, test_min_p, test_max_p)
-                print(f"\r[TEST] min={test_min_p}us max={test_max_p}us offset={test_offset}  applied={applied:4.0f}us  gas={gas_value:4d}   (A = back to SET)          ",
+                applied = steering_pulse_test(steering_axis_raw, test_min_p, test_center_p, test_max_p)
+                print(f"\r[TEST] min={test_min_p}us center={test_center_p}us max={test_max_p}us  applied={applied:4.0f}us  gas={gas_value:4d}   (A = back to SET)          ",
                       end="", flush=True)
             else:
                 print(f"\r[SET] pulse={pulse:4d}us  step={step:3d}us  marked: {marked}  gas={gas_value:4d}          ",
@@ -234,10 +229,9 @@ def main():
                             if min_p is None or center_p is None or max_p is None or max_p <= min_p:
                                 print(f"\nNu poti intra in TEST - marcheaza min/center/max intai (n/c/x).                              ")
                             else:
-                                test_min_p, test_max_p = min_p, max_p
-                                test_offset = round((center_p - min_p) / (max_p - min_p) * 180 - 90)
+                                test_min_p, test_center_p, test_max_p = min_p, center_p, max_p
                                 test_mode = True
-                                print(f"\n>>> TEST MODE: min={min_p}us center={center_p}us max={max_p}us (offset={test_offset}) <<<                              ")
+                                print(f"\n>>> TEST MODE: min={min_p}us center={center_p}us max={max_p}us <<<                              ")
                         else:
                             test_mode = False
                             print("\n>>> SET MODE <<<                                                                        ")

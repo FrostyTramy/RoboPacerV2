@@ -255,9 +255,13 @@ def preprocess(frame_bgr):
     frame_bgr comes from picamera2 in "RGB888" format, which is actually
     BGR-ordered in memory (a picamera2 naming quirk - confirmed against
     its source). data_recorder.py saves training frames straight from
-    that same array with no channel conversion, and they're loaded for
-    training via PIL .convert("RGB"), so the model was trained on
-    true-RGB tensors. Flip channel order here to match.
+    that same array with no channel conversion, and the trainer
+    (trainer/engine/train.py, on the training machine) reads them back
+    with cv2.imread + the same BGR->RGB flip, so the model was trained on
+    true-RGB tensors. Must stay pixel-for-pixel identical to that file's
+    load_and_preprocess()/SteeringDataset (same RGB order, same
+    cv2.resize/INTER_LINEAR, same normalize math) - if you change one,
+    change the other.
     """
     frame_rgb = frame_bgr[:, :, ::-1]
     img = cv2.resize(frame_rgb, (MODEL_SIZE, MODEL_SIZE), interpolation=cv2.INTER_LINEAR)

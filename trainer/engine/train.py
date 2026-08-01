@@ -73,7 +73,10 @@ class SteeringDataset(Dataset):
         rec = self.records[idx]
         angle = float(rec["steering_angle"])
 
-        img_bgr = cv2.imread(str(self.data_root / rec["image_path"]))
+        img_path = self.data_root / rec["image_path"]
+        img_bgr = cv2.imread(str(img_path))
+        if img_bgr is None:
+            raise FileNotFoundError(f"Could not read image: {img_path}")
         img_rgb = img_bgr[:, :, ::-1]
 
         if self.augment:
@@ -214,10 +217,16 @@ def run(config, push=None, should_stop=None):
         push = lambda e: print(e.get("text", e))
 
     json_path = Path(config["json_path"])
+    if json_path.is_dir():
+        json_path = json_path / "driving_log.json"
     model_name = config.get("model_name", "model").strip() or "model"
     epochs = int(config.get("epochs", 20))
     batch_size = int(config.get("batch_size", 32))
     MODELS_DIR.mkdir(exist_ok=True)
+
+    if not json_path.exists():
+        push({"type": "log", "level": "error", "text": f"Not found: {json_path}"})
+        return
 
     random.seed(42)
     torch.manual_seed(42)

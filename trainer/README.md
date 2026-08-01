@@ -21,7 +21,8 @@ on the Pi, then compiles it to a `.hef` for the Hailo-8 via Docker.
 start.bat
 ```
 
-Open `http://localhost:5000`, point it at your `driving_log.json`, set a
+Open `http://localhost:5000`, point it at your dataset folder (e.g.
+`set1`, or the `driving_log.json` inside it directly - both work), set a
 model name / epochs / batch size, click Start. Training runs natively
 (GPU if available); the final HEF compile step runs inside the
 `hailo-dfc` Docker container. Output lands in `models/<name>.hef` (plus

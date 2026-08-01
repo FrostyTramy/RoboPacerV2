@@ -195,7 +195,22 @@ def check_compile_prereqs(push):
     return ok
 
 
+def _ensure_lf_line_endings(path):
+    """compile.sh runs as bash inside the Linux container - CRLF line
+    endings (which a Windows checkout can introduce despite
+    .gitattributes, e.g. if the file was checked out before that rule
+    existed) break it in confusing ways (stray \\r breaks `set -e`, every
+    argument, etc.). Fix it in place here rather than depending on git/
+    checkout behavior on whatever machine this runs on."""
+    raw = path.read_bytes()
+    fixed = raw.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    if fixed != raw:
+        path.write_bytes(fixed)
+
+
 def compile_hef(model_name, push):
+    _ensure_lf_line_endings(ENGINE_DIR / "compile" / "compile.sh")
+
     push({"type": "log", "level": "info", "text": "Building hailo-dfc image (cached after first run)..."})
     build = subprocess.Popen(
         ["docker", "build", "--progress=plain", "-t", "hailo-dfc",

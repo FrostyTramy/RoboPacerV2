@@ -244,12 +244,18 @@ def main():
                 ch = os.read(stdin_fd, 1).decode(errors="ignore")
                 key = ch
                 if ch == "\x1b":
-                    ready2, _, _ = select.select([stdin_fd], [], [], 0.01)
-                    if ready2:
-                        seq = os.read(stdin_fd, 2).decode(errors="ignore")
-                        key = {"[A": "up", "[B": "down", "[C": "right", "[D": "left"}.get(seq, "")
-                    else:
-                        key = ""
+                    # Arrow keys send ESC + 2 more bytes. Read them one at a
+                    # time (not read(2), which can short-read if the second
+                    # byte hasn't arrived yet) with a generous timeout - 10ms
+                    # was too tight over SSH and silently dropped arrow
+                    # presses, leaving `pulse` stuck.
+                    seq = ""
+                    for _ in range(2):
+                        ready2, _, _ = select.select([stdin_fd], [], [], 0.1)
+                        if not ready2:
+                            break
+                        seq += os.read(stdin_fd, 1).decode(errors="ignore")
+                    key = {"[A": "up", "[B": "down", "[C": "right", "[D": "left"}.get(seq, "")
 
                 if key == "q":
                     break

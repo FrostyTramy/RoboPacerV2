@@ -31,9 +31,18 @@ to the 20ms (50Hz) period:
 On power-up almost every ESC refuses to spin the motor until it has seen a
 *stable* signal for a second or two - this is the "arming" sequence, and it
 exists so the motor can't jump to whatever value the PWM line happened to
-be at when power was applied. We replicate that below by holding a fixed
-arm pulse for ESC_ARM_HOLD_SECONDS, then settling on neutral, before ever
-handing control to the joystick.
+be at when power was applied. We replicate that below by holding a steady
+pulse for ESC_ARM_HOLD_SECONDS before ever handing control to the joystick.
+
+That arm pulse must be NEUTRAL (ESC_ARM_PULSE_US = ESC_NEUTRAL_US), not an
+endpoint. Confirmed against the QuicRun 10BL120 manual: there's no special
+"arm at an extreme" concept - 1000us (ESC_MIN_US) is a real brake/reverse
+command the ESC will act on, not a neutral arming cue. In "Forward/Reverse
+with Brake" mode (this ESC's setting), holding 1000us steady is read as
+brake, and depending on the ESC's internal state from the previous run it
+can register as the second push of the brake-then-reverse sequence - i.e.
+holding ESC_MIN_US at startup could launch the car into reverse at full
+throttle. Don't change this away from ESC_NEUTRAL_US.
 --------------------------------------------------------------------------
 """
 
@@ -101,7 +110,11 @@ SERVO_OFFSET = 4
 # ---------------------------------------------------------------------------
 ESC_CHANNEL = 1
 PCA_FREQUENCY_HZ = 50
-ESC_ARM_PULSE_US = 1000
+ESC_ARM_PULSE_US = 1500  # = ESC_NEUTRAL_US - the QuicRun 10BL120 manual has no
+                          # concept of a special "arm at an extreme" pulse; it
+                          # just needs a stable valid signal, and 1000 (our
+                          # ESC_MIN_US, i.e. brake/reverse) is a real command
+                          # the ESC will actually act on, not a neutral arm cue
 ESC_ARM_HOLD_SECONDS = 3.0
 ESC_NEUTRAL_US = 1500
 ESC_MIN_US = 1000

@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>RoboPacerV2 Trainer</title>
+<style>
+  body { font-family: system-ui, sans-serif; background: #111; color: #eee; margin: 0; padding: 24px; }
+  h1 { font-size: 18px; color: #0c8; }
+  .card { background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 16px; margin-bottom: 16px; max-width: 640px; }
+  label { display: block; font-size: 13px; color: #aaa; margin: 10px 0 4px; }
+  input { width: 100%; box-sizing: border-box; background: #0c0c0c; border: 1px solid #333; color: #eee; padding: 8px; border-radius: 4px; font-size: 14px; }
+  .row { display: flex; gap: 12px; }
+  .row > div { flex: 1; }
+  button { margin-top: 14px; padding: 10px 18px; border: none; border-radius: 4px; font-size: 14px; cursor: pointer; }
+  #startBtn { background: #0c8; color: #000; font-weight: 600; }
+  #stopBtn { background: #833; color: #fff; margin-left: 8px; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  #log { background: #000; border: 1px solid #333; border-radius: 4px; padding: 10px; height: 320px;
+         overflow-y: auto; font-family: monospace; font-size: 12px; white-space: pre-wrap; }
+  .info { color: #8cf; } .success { color: #0c8; } .error { color: #f66; } .warning { color: #fc6; } .docker { color: #777; }
+  #progress { height: 6px; background: #333; border-radius: 3px; overflow: hidden; margin-top: 10px; }
+  #progressBar { height: 100%; width: 0%; background: #0c8; transition: width 0.2s; }
+</style>
+</head>
+<body>
+<h1>RoboPacerV2 Trainer</h1>
+
+<div class="card">
+  <label>driving_log.json path (frames resolved relative to its folder)</label>
+  <input id="jsonPath" placeholder="D:\RoboPacer\set1\driving_log.json">
+
+  <div class="row">
+    <div>
+      <label>Model name</label>
+      <input id="modelName" value="model">
+    </div>
+    <div>
+      <label>Epochs</label>
+      <input id="epochs" type="number" value="20">
+    </div>
+    <div>
+      <label>Batch size</label>
+      <input id="batchSize" type="number" value="32">
+    </div>
+  </div>
+
+  <button id="startBtn" onclick="startTraining()">Start Training</button>
+  <button id="stopBtn" onclick="stopTraining()" disabled>Stop</button>
+  <div id="progress"><div id="progressBar"></div></div>
+</div>
+
+<div class="card">
+  <div id="log"></div>
+</div>
+
+<script>
+const logEl = document.getElementById("log");
+const startBtn = document.getElementById("startBtn");
+const stopBtn = document.getElementById("stopBtn");
+const progressBar = document.getElementById("progressBar");
+
+function logLine(text, level) {
+  const div = document.createElement("div");
+  div.className = level || "";
+  div.textContent = text;
+  logEl.appendChild(div);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+async function refreshStatus() {
+  const r = await fetch("/api/status");
+  const data = await r.json();
+  startBtn.disabled = data.running;
+  stopBtn.disabled = !data.running;
+}
+
+async function startTraining() {
+  const config = {
+    json_path: document.getElementById("jsonPath").value.trim(),
+    model_name: document.getElementById("modelName").value.trim() || "model",
+    epochs: parseInt(document.getElementById("epochs").value, 10) || 20,
+    batch_size: parseInt(document.getElementById("batchSize").value, 10) || 32,
+  };
+  if (!config.json_path) { alert("Set the driving_log.json path first."); return; }
+
+  logEl.innerHTML = "";
+  progressBar.style.width = "0%";
+
+  const res = await fetch("/api/train", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(config),
+  });
+  if (!res.ok) {
+    const err = await res.json();
+    logLine("Error: " + (err.error || res.statusText), "error");
+    return;
+  }
+
+  startBtn.disabled = true;
+  stopBtn.disabled = false;
+
+  const stream = new EventSource("/api/stream");
+  stream.onmessage = (e) => {
+    const ev = JSON.parse(e.data);
+    if (ev.type === "log") {
+      logLine(ev.text, ev.level);
+    } else if (ev.type === "split") {
+      logLine(`Dataset: ${ev.total} total -> train=${ev.train} val=${ev.val}`, "info");
+    } else if (ev.type === "epoch") {
+      progressBar.style.width = (100 * ev.epoch / ev.total) + "%";
+      logLine(`Epoch ${ev.epoch}/${ev.total}  train=${ev.train}  val=${ev.val}${ev.best ? "  (best)" : ""}`, "success");
+    } else if (ev.type === "file") {
+      logLine(`Saved: models/${ev.name}`, "success");
+    } else if (ev.type === "done") {
+      logLine("Done.", "success");
+      progressBar.style.width = "100%";
+      stream.close();
+      refreshStatus();
+    }
+  };
+  stream.onerror = () => { stream.close(); refreshStatus(); };
+}
+
+async function stopTraining() {
+  await fetch("/api/stop", { method: "POST" });
+  logLine("Stop requested - will finish the current epoch and export.", "warning");
+}
+
+refreshStatus();
+</script>
+</body>
+</html>

@@ -1,0 +1,31 @@
+# Models / compiled artifacts
+*.hef
+*.pth
+*.onnx
+*.har
+*.npy
+*.whl
+*.deb
+
+# Captured photos / video / datasets (large, personal, not code)
+*.jpg
+*.jpeg
+*.png
+*.mp4
+data_recorder/set1/
+camera/records/
+trainer/models/
+trainer/engine/compile/resources/
+
+# Logs
+*.log
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS / editor cruft
+.DS_Store
+.lgd-nfy0

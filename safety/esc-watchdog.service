@@ -1,0 +1,14 @@
+[Unit]
+Description=RoboPacerV2 ESC fail-safe watchdog
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/home/pi/RoboPacerV2/safety/esc_watchdog.sh
+Restart=always
+RestartSec=2
+User=pi
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,454 @@
+"""
+RoboPacerV2 - Data Recorder
+============================
+Captures camera frames paired with steering-angle labels (behavioral-cloning
+style dataset) while an Xbox controller drives the car through a PCA9685
+(servo = steering on channel 0, ESC = throttle on channel 1 — verify this
+against your actual wiring; see SERVO_CHANNEL / ESC_CHANNEL below).
+
+Camera settings match camera.py (640x480 RGB888 @ 120fps, IMX219 NoIR
+tuning; AnalogueGain 12 here vs camera.py's 16, reduced for outdoor
+daylight) so the live-view app and this recorder agree on what the model
+will actually see.
+
+--------------------------------------------------------------------------
+How the ESC is actually controlled
+--------------------------------------------------------------------------
+An ESC (Electronic Speed Controller) is driven by a standard 50Hz RC PWM
+signal: every 20ms it expects one pulse whose *width* (not amplitude)
+encodes the throttle command:
+
+    ~1000us  -> full reverse / brake   (ESC_MIN_US)
+    ~1500us  -> neutral / stop         (ESC_NEUTRAL_US)
+    ~1700us  -> full forward           (ESC_MAX_US, our configured ceiling)
+
+The PCA9685 doesn't output microseconds directly - it's a 12-bit PWM chip,
+so every pulse width has to be converted into a 16-bit duty cycle relative
+to the 20ms (50Hz) period:
+
+    duty_cycle = (pulse_us / period_us) * 65535   where period_us = 1e6 / freq
+
+On power-up almost every ESC refuses to spin the motor until it has seen a
+*stable* signal for a second or two - this is the "arming" sequence, and it
+exists so the motor can't jump to whatever value the PWM line happened to
+be at when power was applied. We replicate that below by holding a fixed
+arm pulse for ESC_ARM_HOLD_SECONDS, then settling on neutral, before ever
+handing control to the joystick.
+--------------------------------------------------------------------------
+"""
+
+import json
+import logging
+import os
+import select
+import signal
+import time
+
+import board
+import busio
+import cv2
+import numpy as np
+from adafruit_motor import servo as adafruit_servo
+from adafruit_pca9685 import PCA9685
+from evdev import InputDevice, ecodes, list_devices
+from picamera2 import Picamera2
+
+# ---------------------------------------------------------------------------
+# Paths - everything this script reads/writes lives next to it, in its own
+# folder, separate from the rest of RoboPacerV2.
+# ---------------------------------------------------------------------------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATASET_DIR = os.path.join(BASE_DIR, "set1")
+FRAMES_DIR = os.path.join(DATASET_DIR, "frames")
+LOG_JSON_PATH = os.path.join(DATASET_DIR, "driving_log.json")
+LOG_FILE_PATH = os.path.join(BASE_DIR, "data_recorder.log")
+
+os.makedirs(FRAMES_DIR, exist_ok=True)
+
+logging.basicConfig(
+    filename=LOG_FILE_PATH,
+    level=logging.INFO,
+    format="%(asctime)s  %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+for noisy in ("picamera2", "libcamera", "PIL"):
+    logging.getLogger(noisy).setLevel(logging.CRITICAL)
+
+# ---------------------------------------------------------------------------
+# Camera - identical configuration to camera.py
+# ---------------------------------------------------------------------------
+TUNING_FILE = "/usr/share/libcamera/ipa/rpi/pisp/imx219_noir.json"
+FRAME_SIZE = (640, 480)
+FRAME_FORMAT = "RGB888"
+FRAME_RATE = 120.0
+ANALOGUE_GAIN = 12.0  # 16.0 * 0.75 - reduced 25% for outdoor daylight use
+
+SAVED_FRAME_SIZE = (640, 480)  # frame size written to disk for training (matches FRAME_SIZE)
+
+# ---------------------------------------------------------------------------
+# Steering (servo on PCA9685 channel 0)
+# ---------------------------------------------------------------------------
+SERVO_CHANNEL = 0
+SERVO_MIN_PULSE = 800
+SERVO_MAX_PULSE = 2400
+SERVO_MIN_ANGLE = 45
+SERVO_MAX_ANGLE = 135
+SERVO_NEUTRAL_ANGLE = 90
+SERVO_OFFSET = 3
+
+# ---------------------------------------------------------------------------
+# Throttle (ESC on PCA9685 channel 1) - pulse widths in microseconds
+# ---------------------------------------------------------------------------
+ESC_CHANNEL = 1
+PCA_FREQUENCY_HZ = 50
+ESC_ARM_PULSE_US = 1000
+ESC_ARM_HOLD_SECONDS = 3.0
+ESC_NEUTRAL_US = 1500
+ESC_MIN_US = 1000
+ESC_MAX_US = 1700
+
+# ---------------------------------------------------------------------------
+# Controller
+# ---------------------------------------------------------------------------
+BTN_START_RECORDING = ecodes.BTN_A  # start / resume
+BTN_PAUSE = ecodes.BTN_Y  # pause
+BTN_SAVE_AND_STOP = ecodes.BTN_B  # save + quit
+
+AXIS_CENTER = 32767
+AXIS_MAX = 65535
+
+
+class SteeringServo:
+    """Servo on the PCA9685, with I2C-error handling centralized here."""
+
+    def __init__(self, pca):
+        self._servo = adafruit_servo.Servo(
+            pca.channels[SERVO_CHANNEL],
+            min_pulse=SERVO_MIN_PULSE,
+            max_pulse=SERVO_MAX_PULSE,
+        )
+        self.angle = SERVO_NEUTRAL_ANGLE + SERVO_OFFSET
+        self.center()
+
+    def set_angle(self, angle):
+        angle = max(SERVO_MIN_ANGLE, min(SERVO_MAX_ANGLE, angle))
+        self.angle = angle
+        try:
+            self._servo.angle = angle
+        except OSError as e:
+            if e.errno == 121:
+                logging.warning(f"I2C error setting servo angle {angle}")
+            else:
+                raise
+
+    def center(self):
+        self.set_angle(SERVO_NEUTRAL_ANGLE + SERVO_OFFSET)
+
+    def release(self):
+        try:
+            self._servo.angle = None
+        except OSError as e:
+            if e.errno != 121:
+                raise
+
+
+class ESC:
+    """
+    Car ESC on the PCA9685, controlled by microsecond pulse width. See the
+    module docstring above for how RC PWM and arming actually work.
+    """
+
+    def __init__(self, pca):
+        self._channel = pca.channels[ESC_CHANNEL]
+        self._period_us = 1_000_000 / pca.frequency
+
+    def _pulse_to_duty_cycle(self, pulse_us):
+        pulse_us = max(ESC_MIN_US, min(ESC_MAX_US, pulse_us))
+        return int((pulse_us / self._period_us) * 0xFFFF)
+
+    def set_pulse_us(self, pulse_us):
+        try:
+            self._channel.duty_cycle = self._pulse_to_duty_cycle(pulse_us)
+        except OSError as e:
+            if e.errno == 121:
+                logging.warning(f"I2C error setting ESC pulse {pulse_us}")
+            else:
+                raise
+
+    def neutral(self):
+        self.set_pulse_us(ESC_NEUTRAL_US)
+
+    def stop(self):
+        """Cut PWM entirely (used on shutdown)."""
+        try:
+            self._channel.duty_cycle = 0
+        except OSError as e:
+            if e.errno != 121:
+                raise
+
+    def arm(self):
+        print(f"Armare ESC: puls {ESC_ARM_PULSE_US}us timp de {ESC_ARM_HOLD_SECONDS:.0f}s...")
+        self.set_pulse_us(ESC_ARM_PULSE_US)
+        time.sleep(ESC_ARM_HOLD_SECONDS)
+        self.neutral()
+        print(f"ESC armat, setat la neutru ({ESC_NEUTRAL_US}us).")
+
+    @staticmethod
+    def pulse_from_gas_brake(gas_value, brake_value):
+        gas_offset = (gas_value / 1023.0) * (ESC_MAX_US - ESC_NEUTRAL_US)
+        brake_offset = -(brake_value / 1023.0) * (ESC_NEUTRAL_US - ESC_MIN_US)
+        pulse = ESC_NEUTRAL_US + gas_offset + brake_offset
+        return max(ESC_MIN_US, min(ESC_MAX_US, int(pulse)))
+
+
+LABEL_DEADZONE = 0.2
+
+
+def steering_axis_to_label(x_value):
+    raw = np.interp(x_value, [0, AXIS_MAX], [-1.0, 1.0])
+    if abs(raw) <= LABEL_DEADZONE:
+        return 0.0
+    sign = 1.0 if raw > 0 else -1.0
+    label = sign * (abs(raw) - LABEL_DEADZONE) / (1.0 - LABEL_DEADZONE)
+    return round(float(label), 2)
+
+
+def steering_axis_to_angle(x_value):
+    raw = np.interp(x_value, [0, AXIS_MAX], [1.0, -1.0])
+    if abs(raw) <= LABEL_DEADZONE:
+        norm = 0.0
+    else:
+        sign = 1.0 if raw > 0 else -1.0
+        norm = sign * (abs(raw) - LABEL_DEADZONE) / (1.0 - LABEL_DEADZONE)
+    angle = SERVO_NEUTRAL_ANGLE + norm * (SERVO_MAX_ANGLE - SERVO_NEUTRAL_ANGLE) + SERVO_OFFSET
+    return int(max(SERVO_MIN_ANGLE, min(SERVO_MAX_ANGLE, angle)))
+
+
+def find_xbox_controller():
+    for path in list_devices():
+        dev = InputDevice(path)
+        if "xbox" in dev.name.lower():
+            return dev
+    return None
+
+
+def load_driving_log():
+    if os.path.exists(LOG_JSON_PATH) and os.path.getsize(LOG_JSON_PATH) > 0:
+        try:
+            with open(LOG_JSON_PATH) as f:
+                log = json.load(f)
+            print(f"Log existent incarcat: {len(log)} intrari.")
+            return log
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"Log JSON corupt/ilizibil ({e}); pornesc unul nou.")
+    return []
+
+
+def save_driving_log(log):
+    with open(LOG_JSON_PATH, "w") as f:
+        json.dump(log, f, indent=4)
+    print(f"Log salvat in {LOG_JSON_PATH} ({len(log)} intrari).")
+
+
+def next_frame_index():
+    existing = [f for f in os.listdir(FRAMES_DIR) if f.startswith("frame_") and f.endswith(".jpg")]
+    indices = []
+    for name in existing:
+        try:
+            indices.append(int(name.split("_")[1].split(".")[0]))
+        except (IndexError, ValueError):
+            continue
+    return max(indices) + 1 if indices else 0
+
+
+def make_camera():
+    tuning = Picamera2.load_tuning_file(TUNING_FILE)
+    picam2 = Picamera2(tuning=tuning)
+    config = picam2.create_video_configuration(
+        main={"size": FRAME_SIZE, "format": FRAME_FORMAT},
+        controls={"FrameRate": FRAME_RATE, "AnalogueGain": ANALOGUE_GAIN},
+    )
+    picam2.configure(config)
+    return picam2
+
+
+def _handle_sigterm(signum, frame):
+    """
+    SIGTERM (plain `kill <pid>`, `systemctl stop`, ...) has no default
+    Python handler, so without this it would kill the process without ever
+    reaching the `finally` block below - leaving the ESC at whatever pulse
+    it last had. Converting it into a KeyboardInterrupt reuses the same
+    graceful shutdown path as Ctrl+C.
+
+    This still cannot save us from SIGKILL, a crash, or a power loss - that
+    class of failure is what the separate esc_watchdog service is for.
+    """
+    raise KeyboardInterrupt
+
+
+def main():
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+
+    pca = None
+    esc = None
+    steering = None
+    picam2 = None
+    controller = None
+    driving_log = load_driving_log()
+    frame_index = next_frame_index()
+
+    try:
+        # --- I2C / PCA9685 --------------------------------------------------
+        i2c = busio.I2C(board.SCL, board.SDA)
+        pca = PCA9685(i2c)
+        pca.frequency = PCA_FREQUENCY_HZ
+
+        esc = ESC(pca)
+        steering = SteeringServo(pca)
+
+        # --- Controller: fail fast before we spend 3s arming the ESC --------
+        controller = find_xbox_controller()
+        if controller is None:
+            raise ConnectionError("Controller-ul Xbox nu a fost gasit.")
+        controller_fd = controller.fd
+
+        # --- Arm the ESC (see module docstring for why this matters) --------
+        esc.arm()
+
+        # --- Camera -----------------------------------------------------------
+        picam2 = make_camera()
+        picam2.start()
+        logging.info("Camera started - 640x480 @ 120fps gain=16")
+
+        print("\n-----------------------------------------------------")
+        print("Apasa [A] pentru a INCEPE INREGISTRAREA/RESUME.")
+        print("Apasa [Y] pentru a PAUZA inregistrarea.")
+        print("Apasa [B] pentru a OPRI si SALVA log-ul.")
+        print("-----------------------------------------------------")
+
+        gas_value = 0
+        brake_value = 0
+        is_recording = False
+        is_paused = False
+        current_fps = 0
+        frame_count_fps = 0
+        start_time_fps = time.time()
+        steering_axis_raw = AXIS_CENTER
+        steering_label = steering_axis_to_label(steering_axis_raw)
+
+        while True:
+            ready, _, _ = select.select([controller_fd], [], [], 0.001)
+
+            for _ in ready:
+                for event in controller.read():
+                    if event.type == ecodes.EV_ABS:
+                        abs_name = ecodes.ABS.get(event.code)
+
+                        if abs_name == "ABS_GAS":
+                            gas_value = event.value
+                        elif abs_name == "ABS_BRAKE":
+                            brake_value = event.value
+                        elif abs_name == "ABS_X":
+                            steering_axis_raw = event.value
+                            angle = steering_axis_to_angle(event.value)
+                            steering.set_angle(SERVO_NEUTRAL_ANGLE + SERVO_OFFSET if is_paused else angle)
+
+                        if abs_name in ("ABS_GAS", "ABS_BRAKE"):
+                            pulse = ESC.pulse_from_gas_brake(gas_value, brake_value)
+                            esc.set_pulse_us(ESC_NEUTRAL_US if is_paused else pulse)
+
+                    elif event.type == ecodes.EV_KEY and event.value == 1:
+                        if event.code == BTN_START_RECORDING:
+                            if is_paused:
+                                is_paused = False
+                                print("\n>>> RESUME (A) <<<")
+                            elif not is_recording:
+                                is_recording = True
+                                start_time_fps = time.time()
+                                frame_count_fps = 0
+                                print("\n>>> START INREGISTRARE <<<")
+                        elif event.code == BTN_PAUSE:
+                            if is_recording and not is_paused:
+                                is_paused = True
+                                esc.neutral()
+                                steering.center()
+                                print("\n>>> PAUZA (Y) <<<")
+                        elif event.code == BTN_SAVE_AND_STOP:
+                            raise KeyboardInterrupt
+
+            try:
+                frame = picam2.capture_array()
+            except RuntimeError:
+                logging.warning("Camera capture failed, skipping frame")
+                time.sleep(0.05)
+                continue
+
+            steering_label = steering_axis_to_label(steering_axis_raw)
+
+            if is_recording and not is_paused:
+                frame_count_fps += 1
+                elapsed = time.time() - start_time_fps
+                if elapsed > 0:
+                    current_fps = frame_count_fps / elapsed
+
+                image_filename = f"frame_{frame_index:05d}.jpg"
+                image_path_full = os.path.join(FRAMES_DIR, image_filename)
+                saved_frame = frame if SAVED_FRAME_SIZE == FRAME_SIZE else cv2.resize(frame, SAVED_FRAME_SIZE, interpolation=cv2.INTER_AREA)
+                cv2.imwrite(image_path_full, saved_frame)
+
+                driving_log.append({
+                    "image_path": f"{os.path.basename(FRAMES_DIR)}/{image_filename}",
+                    "steering_angle": steering_label,
+                })
+                print(
+                    f"REC {len(driving_log)} | frame {frame_index:05d} | "
+                    f"steer {steering_label:+.2f} | {current_fps:.1f} fps",
+                    end="\r",
+                )
+                frame_index += 1
+
+            display = frame
+            status, color = "OFF", (0, 0, 255)
+            if is_recording and is_paused:
+                status, color = "PAUZA (Y)", (255, 255, 0)
+            elif is_recording:
+                status, color = "REC (A)", (0, 255, 0)
+
+            cv2.putText(display, f"Stare: {status} | Viraj: {steering_label:+.2f}", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA)
+            if current_fps > 0:
+                cv2.putText(display, f"FPS: {current_fps:.1f} | Cadre: {len(driving_log)}",
+                            (10, display.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
+                            (255, 255, 0), 2, cv2.LINE_AA)
+            cv2.imshow("RoboPacerV2 - Data Recorder", display)
+
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                raise KeyboardInterrupt
+
+    except (KeyboardInterrupt, ConnectionError) as e:
+        if isinstance(e, ConnectionError):
+            print(f"\n{e}")
+        print("\nOprire...")
+    except Exception as e:
+        logging.exception("Eroare majora neasteptata")
+        print(f"\nEroare majora neasteptata: {e}")
+    finally:
+        if driving_log:
+            save_driving_log(driving_log)
+        if esc is not None:
+            esc.neutral()
+            time.sleep(0.1)
+            esc.stop()
+        if steering is not None:
+            steering.release()
+        if pca is not None:
+            pca.deinit()
+        if picam2 is not None and getattr(picam2, "started", False):
+            picam2.stop()
+        cv2.destroyAllWindows()
+        logging.info("Data recorder stopped")
+        print("\nHardware oprit si curatat. Program inchis.")
+
+
+if __name__ == "__main__":
+    main()

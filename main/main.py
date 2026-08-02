@@ -7,10 +7,14 @@ adjust throttle (Up = a bit faster, Down = a bit slower, down to 0/stop).
 No manual steering input - curves are entirely up to the model.
 
 Usage:
-    python3 main.py              headless (no window) - fastest, prints
-                                  average FPS once per second to the console
-    python3 main.py --display    opens a live cv2 preview window (costs a
-                                  few ms/frame - see DISPLAY_EVERY_N_FRAMES)
+    python3 main.py                  headless (no window) - fastest, prints
+                                      average FPS once per second to the console
+    python3 main.py --display        opens a live cv2 preview window (costs a
+                                      few ms/frame - see DISPLAY_EVERY_N_FRAMES)
+    python3 main.py --raw-steering   sends the model's raw per-frame prediction
+                                      straight to the servo - no EMA smoothing,
+                                      no deadzone. For testing/debugging what the
+                                      model itself outputs, not for normal driving.
 
 Put exactly one *.hef file in this folder next to this script. If there
 are zero or more than one, this refuses to start (see find_hef_path()) -
@@ -366,8 +370,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--display", action="store_true",
                      help="Open a live cv2 preview window (costs a few ms/frame)")
+    ap.add_argument("--raw-steering", action="store_true",
+                     help="Bypass EMA smoothing and the deadzone - send the model's "
+                          "raw per-frame prediction straight to the servo (for "
+                          "testing/debugging what the model itself actually outputs)")
     args = ap.parse_args()
     show_display = args.display
+    raw_steering = args.raw_steering
 
     signal.signal(signal.SIGTERM, _handle_sigterm)
 
@@ -474,7 +483,10 @@ def main():
                         result = pipeline.infer({input_name: inp})
                         raw_label = float(np.array(result[output_name]).reshape(-1)[0])
                         smooth_label = SMOOTH_ALPHA * raw_label + (1 - SMOOTH_ALPHA) * smooth_label
-                        steer_cmd = 0.0 if abs(smooth_label) < STEERING_DEADZONE else smooth_label
+                        if raw_steering:
+                            steer_cmd = raw_label
+                        else:
+                            steer_cmd = 0.0 if abs(smooth_label) < STEERING_DEADZONE else smooth_label
 
                         steering.set_angle(steering_label_to_angle(steer_cmd))
                         esc.set_pulse_us(throttle_level_to_pulse(throttle_level))
@@ -492,7 +504,7 @@ def main():
                             if frame_counter % DISPLAY_EVERY_N_FRAMES == 0:
                                 pulse = throttle_level_to_pulse(throttle_level)
                                 display = frame
-                                cv2.putText(display, f"Steer: {steer_cmd:+.2f} (raw {smooth_label:+.2f})  Throttle: {throttle_level}/{THROTTLE_MAX_LEVEL} ({pulse}us)",
+                                cv2.putText(display, f"Steer: {steer_cmd:+.2f} (model {raw_label:+.2f} smoothed {smooth_label:+.2f})  Throttle: {throttle_level}/{THROTTLE_MAX_LEVEL} ({pulse}us)",
                                             (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2, cv2.LINE_AA)
                                 cv2.putText(display, f"FPS: {current_fps:.1f}", (10, display.shape[0] - 10),
                                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2, cv2.LINE_AA)
@@ -503,7 +515,7 @@ def main():
                         else:
                             if t_now - last_report_time >= 1.0:
                                 avg_fps = frames_since_report / (t_now - last_report_time)
-                                print(f"fps={avg_fps:.1f}  steer={steer_cmd:+.2f} (raw {smooth_label:+.2f})  "
+                                print(f"fps={avg_fps:.1f}  steer={steer_cmd:+.2f} (model {raw_label:+.2f} smoothed {smooth_label:+.2f})  "
                                       f"throttle={throttle_level}/{THROTTLE_MAX_LEVEL}")
                                 frames_since_report = 0
                                 last_report_time = t_now

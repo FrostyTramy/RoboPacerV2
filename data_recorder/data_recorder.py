@@ -44,13 +44,34 @@ can register as the second push of the brake-then-reverse sequence - i.e.
 holding ESC_MIN_US at startup could launch the car into reverse at full
 throttle. Don't change this away from ESC_NEUTRAL_US.
 --------------------------------------------------------------------------
+Why frame writes happen on a background thread
+--------------------------------------------------------------------------
+Writing every recorded frame to disk (cv2.imwrite) used to happen inline in
+the same loop that reads the controller and writes servo/ESC pulses. An SD
+card can stall for several seconds under sustained continuous write load
+(internal garbage collection/wear-leveling) - when that write call itself
+was blocking the loop, the *entire* control loop froze along with it: no
+controller events got read, no new PWM value got written, so the car kept
+driving at whatever throttle/steering it had going into the stall (the
+PCA9685 holds its last programmed duty cycle in hardware until told
+otherwise - this looked like a stuck ESC/servo but wasn't one). The
+esc_watchdog safety net doesn't catch this either - it only reacts to the
+process dying, and a frozen-but-alive loop still shows up as running.
+
+Recording now hands frames off to a queue that a separate writer thread
+drains - the control loop's per-iteration cost is just a fast in-memory
+enqueue, so a slow/stalled disk can delay when a frame gets *saved* but can
+never block reading the controller or updating the ESC/servo again.
+--------------------------------------------------------------------------
 """
 
 import json
 import logging
 import os
+import queue
 import select
 import signal
+import threading
 import time
 
 import board
@@ -263,6 +284,30 @@ def save_driving_log(log):
     print(f"Log salvat in {LOG_JSON_PATH} ({len(log)} intrari).")
 
 
+WRITE_QUEUE_MAXSIZE = 400  # ~5s of buffering at 80fps before frames start
+                            # getting dropped - generous enough to absorb an
+                            # SD card stall without ever blocking the caller
+
+
+def _writer_loop(write_queue, driving_log, frames_dir):
+    """Runs on a background thread for the whole program lifetime. The only
+    thing that ever touches disk for a recorded frame - see the module
+    docstring for why this isn't inline in the control loop."""
+    while True:
+        item = write_queue.get()
+        if item is None:  # sentinel - drain requested, stop
+            write_queue.task_done()
+            return
+        image_filename, saved_frame, steering_label, ts = item
+        cv2.imwrite(os.path.join(frames_dir, image_filename), saved_frame)
+        driving_log.append({
+            "image_path": f"{os.path.basename(frames_dir)}/{image_filename}",
+            "steering_angle": steering_label,
+            "timestamp": ts,
+        })
+        write_queue.task_done()
+
+
 def next_frame_index():
     existing = [f for f in os.listdir(FRAMES_DIR) if f.startswith("frame_") and f.endswith(".jpg")]
     indices = []
@@ -309,6 +354,15 @@ def main():
     controller = None
     driving_log = load_driving_log()
     frame_index = next_frame_index()
+
+    # Started unconditionally (even before recording ever starts) and kept
+    # running for the whole program - idle-waiting on an empty queue costs
+    # nothing. See _writer_loop()/module docstring for why frame writes
+    # don't happen inline in the control loop below.
+    write_queue = queue.Queue(maxsize=WRITE_QUEUE_MAXSIZE)
+    writer_thread = threading.Thread(
+        target=_writer_loop, args=(write_queue, driving_log, FRAMES_DIR), daemon=True)
+    writer_thread.start()
 
     try:
         # --- I2C / PCA9685 --------------------------------------------------
@@ -405,18 +459,16 @@ def main():
                     current_fps = frame_count_fps / elapsed
 
                 image_filename = f"frame_{frame_index:05d}.jpg"
-                image_path_full = os.path.join(FRAMES_DIR, image_filename)
                 saved_frame = frame if SAVED_FRAME_SIZE == FRAME_SIZE else cv2.resize(frame, SAVED_FRAME_SIZE, interpolation=cv2.INTER_AREA)
-                cv2.imwrite(image_path_full, saved_frame)
-
-                driving_log.append({
-                    "image_path": f"{os.path.basename(FRAMES_DIR)}/{image_filename}",
-                    "steering_angle": steering_label,
-                    "timestamp": time.time(),
-                })
+                try:
+                    # .copy() - the writer thread reads this after capture_array()
+                    # may already be filling the next frame's buffer.
+                    write_queue.put_nowait((image_filename, saved_frame.copy(), steering_label, time.time()))
+                except queue.Full:
+                    logging.warning(f"Write queue full - dropped frame {frame_index:05d} (disk falling behind)")
                 print(
                     f"REC {len(driving_log)} | frame {frame_index:05d} | "
-                    f"steer {steering_label:+.2f} | {current_fps:.1f} fps",
+                    f"steer {steering_label:+.2f} | {current_fps:.1f} fps | coada={write_queue.qsize()}",
                     end="\r",
                 )
                 frame_index += 1
@@ -447,10 +499,22 @@ def main():
         logging.exception("Eroare majora neasteptata")
         print(f"\nEroare majora neasteptata: {e}")
     finally:
+        # Motor to neutral first, before anything that can take a while
+        # (like draining a backlog of queued disk writes) - stopping the
+        # car is more urgent than finishing the save.
+        if esc is not None:
+            esc.neutral()
+
+        print("\nSe salveaza cadrele ramase in coada de scriere pe disc...")
+        write_queue.put(None)
+        writer_thread.join(timeout=30)
+        if writer_thread.is_alive():
+            logging.warning("Writer thread did not stop within 30s - some recent frames may be missing from the log.")
+            print("Atentie: thread-ul de scriere nu s-a oprit la timp - unele cadre recente pot lipsi din log.")
+
         if driving_log:
             save_driving_log(driving_log)
         if esc is not None:
-            esc.neutral()
             time.sleep(0.1)
             esc.stop()
         if steering is not None:

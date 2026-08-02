@@ -43,6 +43,16 @@ CALIB_N = 200
 FRAME_STACK_N = 3
 FRAME_STACK_GAP_SECONDS = 0.1
 
+# ── Train/val split ─────────────────────────────────────────────────────
+# At high recording fps, frames a few milliseconds apart are near-duplicates
+# (same image, same label). A plain per-frame random split would scatter
+# those near-duplicates across both train and val, so val would partly be
+# "grading" the model on frames it already effectively trained on -
+# inflating val accuracy without reflecting real generalization. Splitting
+# by contiguous time blocks instead keeps every near-duplicate cluster on
+# one side of the split.
+SPLIT_BLOCK_SECONDS = 3.0
+
 ENGINE_DIR = Path(__file__).parent
 ROOT_DIR = ENGINE_DIR.parent
 MODELS_DIR = ROOT_DIR / "models"
@@ -117,6 +127,32 @@ def _history_indices(records_sorted, idx, n=FRAME_STACK_N, gap=FRAME_STACK_GAP_S
                 break
         result.append(found)
     return result
+
+
+def _chunk_indices(records_sorted, block_seconds=SPLIT_BLOCK_SECONDS):
+    """
+    Groups time-ordered record indices into contiguous chunks spanning
+    roughly block_seconds each (also cut at session boundaries, so a chunk
+    never silently straddles a pause/new-recording gap). Used to split
+    train/val by whole chunks instead of individual frames - see
+    SPLIT_BLOCK_SECONDS above for why.
+    """
+    chunks = []
+    current = []
+    chunk_start_ts = None
+    for i, r in enumerate(records_sorted):
+        ts = r["timestamp"]
+        if current and (ts - records_sorted[current[-1]]["timestamp"] > FRAME_STACK_GAP_SECONDS * 5
+                         or ts - chunk_start_ts >= block_seconds):
+            chunks.append(current)
+            current = []
+            chunk_start_ts = None
+        if chunk_start_ts is None:
+            chunk_start_ts = ts
+        current.append(i)
+    if current:
+        chunks.append(current)
+    return chunks
 
 
 def _load_stack(records_sorted, idx, data_root, flip=False, brightness=1.0):
@@ -455,14 +491,21 @@ def run(config, push=None, should_stop=None):
     _require_timestamps(records)
     # records_sorted stays intact (full, time-ordered) so any sample can look
     # back for stack history regardless of which split it landed in - only
-    # the shuffled *indices* get split into train/val.
+    # whole time-blocks get shuffled and split into train/val (see
+    # _chunk_indices - keeps near-duplicate frames on the same side).
     records_sorted = sorted(records, key=lambda r: r["timestamp"])
-    all_idx = list(range(len(records_sorted)))
-    random.shuffle(all_idx)
-    n_train = int(0.8 * len(all_idx))
-    n_val = int(0.1 * len(all_idx))
-    train_idx = all_idx[:n_train]
-    val_idx = all_idx[n_train:n_train + n_val]
+    chunks = _chunk_indices(records_sorted)
+    random.shuffle(chunks)
+    total = len(records_sorted)
+    train_target = int(0.8 * total)
+    val_target = int(0.1 * total)
+    train_idx, val_idx = [], []
+    for chunk in chunks:
+        if len(train_idx) < train_target:
+            train_idx.extend(chunk)
+        elif len(val_idx) < val_target:
+            val_idx.extend(chunk)
+        # else: leftover chunks held out, unused - same as before
     push({"type": "split", "train": len(train_idx), "val": len(val_idx), "total": len(records_sorted)})
 
     train_ld = DataLoader(SteeringDataset(records_sorted, train_idx, data_root, augment=True),

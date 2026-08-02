@@ -30,6 +30,19 @@ IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 CALIB_N = 200
 
+# ── Frame stacking (temporal memory) ───────────────────────────────────────
+# The model sees the current frame plus FRAME_STACK_N - 1 frames from its
+# recent past, concatenated as extra input channels, so it can tell "I'm
+# already correcting left" apart from "I've always been going straight" -
+# info a single memoryless frame can't carry. Consecutive camera captures
+# (~10ms apart at 100fps) look nearly identical, so we don't stack raw
+# consecutive frames - we pick frames roughly FRAME_STACK_GAP_SECONDS apart
+# in wall-clock time. Both constants must match main.py's copies exactly:
+# main.py builds the same kind of stack live, from a rolling buffer, and the
+# HEF's input shape (3 * FRAME_STACK_N channels) is baked in at compile time.
+FRAME_STACK_N = 3
+FRAME_STACK_GAP_SECONDS = 0.1
+
 ENGINE_DIR = Path(__file__).parent
 ROOT_DIR = ENGINE_DIR.parent
 MODELS_DIR = ROOT_DIR / "models"
@@ -37,7 +50,7 @@ MODELS_DIR = ROOT_DIR / "models"
 
 # ── Preprocessing - must match main.py's preprocess() exactly ─────────────
 
-def load_and_preprocess(path):
+def load_and_preprocess(path, flip=False, brightness=1.0):
     """
     data_recorder.py on the Pi saves frames straight from the camera's
     capture_array() with no channel conversion; that array is BGR-ordered
@@ -52,44 +65,101 @@ def load_and_preprocess(path):
     if img_bgr is None:
         raise FileNotFoundError(f"Could not read image: {path}")
     img_rgb = img_bgr[:, :, ::-1]
+    if flip:
+        img_rgb = img_rgb[:, ::-1, :]
+    if brightness != 1.0:
+        img_rgb = np.clip(img_rgb.astype(np.float32) * brightness, 0, 255).astype(np.uint8)
     img = cv2.resize(img_rgb, (IMG_SIZE, IMG_SIZE), interpolation=cv2.INTER_LINEAR)
     img = img.astype(np.float32) / 255.0
     img = (img - IMAGENET_MEAN) / IMAGENET_STD
     return img  # HWC float32, RGB, normalized
 
 
+# ── Frame-stack assembly - shared by SteeringDataset and
+# save_calibration_data, so the temporal lookback logic can't drift between
+# the two ────────────────────────────────────────────────────────────────
+
+def _require_timestamps(records):
+    if any("timestamp" not in r for r in records):
+        raise ValueError(
+            "This dataset has records without a 'timestamp' field - frame "
+            "stacking needs it to know which frames are close in time. "
+            "Re-record with the current data_recorder.py (it now stamps "
+            "every frame), or use an older trainer build for this dataset."
+        )
+
+
+def _history_indices(records_sorted, idx, n=FRAME_STACK_N, gap=FRAME_STACK_GAP_SECONDS):
+    """
+    Returns n indices into records_sorted (time-ordered): [idx, idx ~gap
+    seconds earlier, idx ~2*gap seconds earlier, ...]. Walks backward frame
+    by frame accumulating real elapsed time rather than assuming a fixed
+    recording fps. If history runs out, or two adjacent recorded frames are
+    implausibly far apart in time (a pause or a new recording session
+    appended to the same driving_log.json - not actually one continuous
+    drive), stops there and pads by repeating the last valid frame found -
+    same fallback main.py uses live when it hasn't captured enough history
+    yet (e.g. right after startup).
+    """
+    cur_ts = records_sorted[idx]["timestamp"]
+    result = [idx]
+    for k in range(1, n):
+        target_ts = cur_ts - k * gap
+        found = result[-1]
+        jj = result[-1]
+        while jj > 0:
+            step = records_sorted[jj]["timestamp"] - records_sorted[jj - 1]["timestamp"]
+            if step > gap * 5:  # pause / session boundary
+                break
+            jj -= 1
+            if records_sorted[jj]["timestamp"] <= target_ts:
+                found = jj
+                break
+        result.append(found)
+    return result
+
+
+def _load_stack(records_sorted, idx, data_root, flip=False, brightness=1.0):
+    indices = _history_indices(records_sorted, idx)
+    frames = [
+        load_and_preprocess(data_root / records_sorted[i]["image_path"], flip=flip, brightness=brightness)
+        for i in indices
+    ]
+    return np.concatenate(frames, axis=-1)  # H, W, 3 * FRAME_STACK_N
+
+
 # ── Dataset ─────────────────────────────────────────────────────────────
 
 class SteeringDataset(Dataset):
-    def __init__(self, records, data_root, augment=False):
-        self.records = records
+    """
+    records_sorted must be the FULL time-ordered dataset (not just this
+    split) - a sample near the start of the val split still needs to look
+    back into frames that may only exist in records_sorted, regardless of
+    which split they'd individually belong to. sample_indices selects which
+    of those records are actually this split's targets.
+    """
+
+    def __init__(self, records_sorted, sample_indices, data_root, augment=False):
+        self.records_sorted = records_sorted
+        self.sample_indices = sample_indices
         self.data_root = Path(data_root)
         self.augment = augment
 
     def __len__(self):
-        return len(self.records)
+        return len(self.sample_indices)
 
-    def __getitem__(self, idx):
-        rec = self.records[idx]
+    def __getitem__(self, i):
+        idx = self.sample_indices[i]
+        rec = self.records_sorted[idx]
         angle = float(rec["steering_angle"])
 
-        img_path = self.data_root / rec["image_path"]
-        img_bgr = cv2.imread(str(img_path))
-        if img_bgr is None:
-            raise FileNotFoundError(f"Could not read image: {img_path}")
-        img_rgb = img_bgr[:, :, ::-1]
+        flip = self.augment and random.random() < 0.5
+        brightness = random.uniform(0.7, 1.3) if self.augment else 1.0
+        if flip:
+            angle = -angle
 
-        if self.augment:
-            if random.random() < 0.5:
-                img_rgb = img_rgb[:, ::-1, :]  # horizontal flip
-                angle = -angle
-            brightness = random.uniform(0.7, 1.3)
-            img_rgb = np.clip(img_rgb.astype(np.float32) * brightness, 0, 255).astype(np.uint8)
-
-        img = cv2.resize(img_rgb, (IMG_SIZE, IMG_SIZE), interpolation=cv2.INTER_LINEAR)
-        img = img.astype(np.float32) / 255.0
-        img = (img - IMAGENET_MEAN) / IMAGENET_STD
-        tensor = torch.from_numpy(img.transpose(2, 0, 1).copy())  # HWC -> CHW
+        stack = _load_stack(self.records_sorted, idx, self.data_root, flip=flip, brightness=brightness)
+        tensor = torch.from_numpy(stack.transpose(2, 0, 1).copy())  # HWC -> CHW
         return tensor, torch.tensor(angle, dtype=torch.float32)
 
 
@@ -98,6 +168,23 @@ class SteeringDataset(Dataset):
 
 def build_model():
     m = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
+
+    in_ch = 3 * FRAME_STACK_N
+    if in_ch != m.conv1.in_channels:
+        # Widen the first conv to accept the stacked input. Tile the
+        # pretrained 3-channel filters across the extra copies and divide by
+        # FRAME_STACK_N, so a stack of similar-looking frames produces a
+        # first-conv output at roughly the scale the pretrained BatchNorm
+        # right after it was calibrated for - otherwise each extra copy adds
+        # fully to the sum and the activation statistics start out badly off
+        # from what the rest of the pretrained network expects.
+        old_conv1 = m.conv1
+        new_conv1 = nn.Conv2d(in_ch, old_conv1.out_channels, kernel_size=old_conv1.kernel_size,
+                               stride=old_conv1.stride, padding=old_conv1.padding, bias=False)
+        with torch.no_grad():
+            new_conv1.weight.copy_(old_conv1.weight.repeat(1, FRAME_STACK_N, 1, 1) / FRAME_STACK_N)
+        m.conv1 = new_conv1
+
     m.fc = nn.Sequential(
         nn.Linear(512, 64),
         nn.ReLU(inplace=True),
@@ -152,7 +239,7 @@ def export_onnx(model, device, path):
     the old exporter instead of fighting the downgrade converter.
     """
     model.eval()
-    dummy = torch.zeros(1, 3, IMG_SIZE, IMG_SIZE, device=device)
+    dummy = torch.zeros(1, 3 * FRAME_STACK_N, IMG_SIZE, IMG_SIZE, device=device)
     torch.onnx.export(
         model, dummy, str(path),
         export_params=True, opset_version=13, do_constant_folding=True,
@@ -163,13 +250,16 @@ def export_onnx(model, device, path):
 
 
 # ── Calibration data for the Hailo INT8 quantizer - reuses the exact same
-# preprocessing as training, saved directly in NHWC (what the DFC wants),
-# so compile.sh doesn't need a separate transpose step ────────────────
+# preprocessing (and frame-stack assembly) as training, saved directly in
+# NHWC (what the DFC wants), so compile.sh doesn't need a separate
+# transpose step ───────────────────────────────────────────────────────
 
 def save_calibration_data(records, data_root, out_path, n=CALIB_N):
-    sample = random.sample(records, min(n, len(records)))
-    arrays = [load_and_preprocess(Path(data_root) / r["image_path"]) for r in sample]
-    calib = np.stack(arrays).astype(np.float32)  # (N, H, W, C)
+    _require_timestamps(records)
+    records_sorted = sorted(records, key=lambda r: r["timestamp"])
+    sample_idx = random.sample(range(len(records_sorted)), min(n, len(records_sorted)))
+    arrays = [_load_stack(records_sorted, i, Path(data_root)) for i in sample_idx]
+    calib = np.stack(arrays).astype(np.float32)  # (N, H, W, 3 * FRAME_STACK_N)
     np.save(str(out_path), calib)
 
 
@@ -362,16 +452,22 @@ def run(config, push=None, should_stop=None):
         push({"type": "log", "level": "error", "text": "Not enough valid samples to train."})
         return
 
-    random.shuffle(records)
-    n_train = int(0.8 * len(records))
-    n_val = int(0.1 * len(records))
-    train_r = records[:n_train]
-    val_r = records[n_train:n_train + n_val]
-    push({"type": "split", "train": len(train_r), "val": len(val_r), "total": len(records)})
+    _require_timestamps(records)
+    # records_sorted stays intact (full, time-ordered) so any sample can look
+    # back for stack history regardless of which split it landed in - only
+    # the shuffled *indices* get split into train/val.
+    records_sorted = sorted(records, key=lambda r: r["timestamp"])
+    all_idx = list(range(len(records_sorted)))
+    random.shuffle(all_idx)
+    n_train = int(0.8 * len(all_idx))
+    n_val = int(0.1 * len(all_idx))
+    train_idx = all_idx[:n_train]
+    val_idx = all_idx[n_train:n_train + n_val]
+    push({"type": "split", "train": len(train_idx), "val": len(val_idx), "total": len(records_sorted)})
 
-    train_ld = DataLoader(SteeringDataset(train_r, data_root, augment=True),
+    train_ld = DataLoader(SteeringDataset(records_sorted, train_idx, data_root, augment=True),
                            batch_size=batch_size, shuffle=True, num_workers=0)
-    val_ld = DataLoader(SteeringDataset(val_r, data_root, augment=False),
+    val_ld = DataLoader(SteeringDataset(records_sorted, val_idx, data_root, augment=False),
                          batch_size=batch_size, shuffle=False, num_workers=0)
 
     model = build_model().to(device)

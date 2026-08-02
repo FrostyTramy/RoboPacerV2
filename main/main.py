@@ -74,6 +74,7 @@ import os
 import select
 import signal
 import time
+from collections import deque
 
 import board
 import busio
@@ -151,7 +152,30 @@ THROTTLE_MAX_LEVEL = int((ESC_MAX_US - ESC_NEUTRAL_US) / THROTTLE_STEP_US)  # 10
 MODEL_SIZE = 224  # ResNet-18 trained at 224x224 (see RoboPacerTrainer)
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
-SMOOTH_ALPHA = 0.3  # EMA smoothing on the predicted steering label
+SMOOTH_ALPHA = 0.5  # EMA smoothing on the predicted steering label. Higher =
+                     # less lag (faster reaction) but more raw model jitter
+                     # passed through; lower = smoother but more delay. Delay
+                     # matters more at higher throttle (car covers more
+                     # ground per frame), so this is tuned toward "less lag"
+                     # and jitter is instead handled by STEERING_DEADZONE
+                     # below, not by over-smoothing.
+STEERING_DEADZONE = 0.06  # |smoothed label| below this is treated as 0 (go
+                           # straight). Model output on straight sections is
+                           # never exactly 0, it drifts a little frame to
+                           # frame - without this, that drift alone causes
+                           # visible weaving even on a straight track.
+
+# ---------------------------------------------------------------------------
+# Frame stacking (temporal memory) - must match trainer/engine/train.py's
+# copies of these two constants exactly. The model's input is the current
+# frame plus FRAME_STACK_N - 1 frames pulled from a rolling buffer, each
+# roughly FRAME_STACK_GAP_SECONDS further in the past, concatenated as extra
+# channels. Consecutive camera captures (~10ms apart at 100fps) look nearly
+# identical, so we don't stack raw consecutive frames - the buffer is
+# searched by wall-clock time, same as the training-side lookback.
+# ---------------------------------------------------------------------------
+FRAME_STACK_N = 3
+FRAME_STACK_GAP_SECONDS = 0.1
 
 DISPLAY_EVERY_N_FRAMES = 4  # cv2.imshow costs ~4-5ms/call - update it less often
                              # than the control loop (measured: capture+
@@ -280,7 +304,33 @@ def preprocess(frame_bgr):
     img = cv2.resize(frame_rgb, (MODEL_SIZE, MODEL_SIZE), interpolation=cv2.INTER_LINEAR)
     img = img.astype(np.float32) / 255.0
     img = (img - IMAGENET_MEAN) / IMAGENET_STD
-    return img[np.newaxis]  # NHWC
+    return img  # HWC, RGB, normalized (batch dim added after frame-stacking)
+
+
+def build_frame_stack(history, now):
+    """
+    history is a deque of (timestamp, preprocessed_HWC_frame) tuples, newest
+    last - history[-1] is always the current frame. Picks FRAME_STACK_N
+    frames spaced ~FRAME_STACK_GAP_SECONDS apart in wall-clock time (not by
+    a fixed frame-count stride, since consecutive captures are only ~10ms
+    apart at 100fps and would look nearly identical). See
+    trainer/engine/train.py's _history_indices() for the matching
+    training-side logic.
+
+    Pads with the oldest frame currently in the buffer when there isn't
+    enough history yet (e.g. right after startup) - the same fallback
+    train.py uses when it hits a session boundary.
+    """
+    frames = [history[-1][1]]
+    for k in range(1, FRAME_STACK_N):
+        target_ts = now - k * FRAME_STACK_GAP_SECONDS
+        best = history[0][1]  # fallback: oldest available
+        for ts, img in reversed(history):
+            if ts <= target_ts:
+                best = img
+                break
+        frames.append(best)
+    return np.concatenate(frames, axis=-1)  # H, W, 3 * FRAME_STACK_N
 
 
 def quantize_input(img_float_nhwc, scale, zero_point):
@@ -382,6 +432,7 @@ def main():
             frame_counter = 0
             frames_since_report = 0
             last_report_time = time.time()
+            frame_history = deque()  # (timestamp, preprocessed HWC frame)
 
             with network_group.activate(ng_params):
                 with InferVStreams(network_group, in_vstream_params, out_vstream_params) as pipeline:
@@ -409,12 +460,23 @@ def main():
                             continue
 
                         img_float = preprocess(frame)
-                        inp = quantize_input(img_float, input_scale, input_zero_point)
+                        now = time.time()
+                        frame_history.append((now, img_float))
+                        # Keep only what build_frame_stack() could possibly need, plus a
+                        # margin - bounds memory without needing a fixed-count maxlen
+                        # (capture fps can vary a bit frame to frame).
+                        cutoff = now - (FRAME_STACK_N - 1) * FRAME_STACK_GAP_SECONDS - 0.5
+                        while len(frame_history) > 1 and frame_history[0][0] < cutoff:
+                            frame_history.popleft()
+
+                        stack = build_frame_stack(frame_history, now)
+                        inp = quantize_input(stack[np.newaxis], input_scale, input_zero_point)
                         result = pipeline.infer({input_name: inp})
                         raw_label = float(np.array(result[output_name]).reshape(-1)[0])
                         smooth_label = SMOOTH_ALPHA * raw_label + (1 - SMOOTH_ALPHA) * smooth_label
+                        steer_cmd = 0.0 if abs(smooth_label) < STEERING_DEADZONE else smooth_label
 
-                        steering.set_angle(steering_label_to_angle(smooth_label))
+                        steering.set_angle(steering_label_to_angle(steer_cmd))
                         esc.set_pulse_us(throttle_level_to_pulse(throttle_level))
 
                         t_now = time.time()
@@ -430,7 +492,7 @@ def main():
                             if frame_counter % DISPLAY_EVERY_N_FRAMES == 0:
                                 pulse = throttle_level_to_pulse(throttle_level)
                                 display = frame
-                                cv2.putText(display, f"Steer: {smooth_label:+.2f}  Throttle: {throttle_level}/{THROTTLE_MAX_LEVEL} ({pulse}us)",
+                                cv2.putText(display, f"Steer: {steer_cmd:+.2f} (raw {smooth_label:+.2f})  Throttle: {throttle_level}/{THROTTLE_MAX_LEVEL} ({pulse}us)",
                                             (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2, cv2.LINE_AA)
                                 cv2.putText(display, f"FPS: {current_fps:.1f}", (10, display.shape[0] - 10),
                                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2, cv2.LINE_AA)
@@ -441,7 +503,7 @@ def main():
                         else:
                             if t_now - last_report_time >= 1.0:
                                 avg_fps = frames_since_report / (t_now - last_report_time)
-                                print(f"fps={avg_fps:.1f}  steer={smooth_label:+.2f}  "
+                                print(f"fps={avg_fps:.1f}  steer={steer_cmd:+.2f} (raw {smooth_label:+.2f})  "
                                       f"throttle={throttle_level}/{THROTTLE_MAX_LEVEL}")
                                 frames_since_report = 0
                                 last_report_time = t_now

@@ -412,6 +412,7 @@ def main():
                 driving_log.append({
                     "image_path": f"{os.path.basename(FRAMES_DIR)}/{image_filename}",
                     "steering_angle": steering_label,
+                    "timestamp": time.time(),
                 })
                 print(
                     f"REC {len(driving_log)} | frame {frame_index:05d} | "

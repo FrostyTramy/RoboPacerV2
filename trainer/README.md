@@ -50,6 +50,60 @@ to retrain. Fix whatever Docker/DFC issue caused the failure, then click
 **"Retry compile (no retrain)"** with the same model name - it recompiles
 straight from the existing `.onnx` and calibration data.
 
+## Dataset format: classic vs timestamped (frame-stacked)
+
+`data_recorder.py` can record two formats:
+
+- **Default** - each frame also gets a `timestamp`. This lets the trainer
+  build a *frame-stacked* input: the current frame plus the 2 preceding
+  ones (~0.1s apart), concatenated as extra channels, so the model has
+  some short-term memory ("I'm already correcting left" vs "I've always
+  gone straight") instead of reacting to each frame in isolation.
+- **`data_recorder.py --legacy`** - classic format, just `image_path` +
+  `steering_angle`, no timestamp. Trains a plain single-frame model - no
+  temporal memory, but a smaller/simpler network and no dependency on
+  recording fps being reasonably steady.
+
+You don't need to tell the trainer or `main.py` which one you used -
+they both detect it automatically:
+
+- `engine/train.py` checks whether the dataset's records have a
+  `timestamp` field and picks single-frame vs frame-stacked training
+  accordingly (adjusting the model's input channels, export shape, and
+  calibration data to match). A dataset that mixes both formats (e.g.
+  from concatenating two recording sessions made with different flags)
+  fails fast with a clear error instead of training on ambiguous data.
+- `main/main.py` reads the compiled `.hef`'s own input shape at startup
+  and infers the same thing from its channel count (3 = classic, 9 = the
+  default 3-frame stack) - so whichever `.hef` you drop into `main/`,
+  next to `main.py`, it drives the car correctly either way.
+
+If a `driving_log.json` already exists, `data_recorder.py` keeps
+recording in whatever format is already in that file (ignoring
+`--legacy` if it doesn't match) rather than mixing formats in one
+dataset.
+
+## Class imbalance (steering distribution)
+
+Real driving logs are dominated by near-zero steering - most of a drive
+is straight road. On one recorded set here, 74% of frames had
+`steering_angle == 0.0` exactly, and only ~2% were sharp turns
+(`|angle| > 0.6`). Plain MSE loss weighs every frame equally, so with a
+distribution like that the loss is minimized almost entirely by getting
+the abundant straight frames right - the rare turn frames barely move
+the gradient, and the model converges to predicting near-zero for
+almost everything (visibly: tiny, hesitant steering that won't commit
+to a real turn).
+
+`engine/train.py` counters this with a `WeightedRandomSampler` on the
+training split only (validation keeps the true distribution, so val MSE
+stays a meaningful, comparable metric across runs): samples are bucketed
+by `|steering_angle|` and reweighted so each bucket contributes roughly
+equally per epoch, regardless of how rare it actually is in the raw
+dataset. This can't invent recovery/turning examples that were never
+recorded - it just stops the ones that *do* exist from being drowned out
+by the straight-driving majority.
+
 ## Why the preprocessing looks the way it does
 
 `engine/train.py`'s `load_and_preprocess()` / `SteeringDataset` intentionally

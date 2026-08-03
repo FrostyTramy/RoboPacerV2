@@ -311,10 +311,10 @@ def preprocess(frame_bgr):
     return img  # HWC, RGB, normalized (batch dim added after frame-stacking)
 
 
-def build_frame_stack(history, now):
+def build_frame_stack(history, now, frame_stack_n=FRAME_STACK_N):
     """
     history is a deque of (timestamp, preprocessed_HWC_frame) tuples, newest
-    last - history[-1] is always the current frame. Picks FRAME_STACK_N
+    last - history[-1] is always the current frame. Picks frame_stack_n
     frames spaced ~FRAME_STACK_GAP_SECONDS apart in wall-clock time (not by
     a fixed frame-count stride, since consecutive captures are only ~10ms
     apart at 100fps and would look nearly identical). See
@@ -326,7 +326,7 @@ def build_frame_stack(history, now):
     train.py uses when it hits a session boundary.
     """
     frames = [history[-1][1]]
-    for k in range(1, FRAME_STACK_N):
+    for k in range(1, frame_stack_n):
         target_ts = now - k * FRAME_STACK_GAP_SECONDS
         best = history[0][1]  # fallback: oldest available
         for ts, img in reversed(history):
@@ -334,7 +334,7 @@ def build_frame_stack(history, now):
                 best = img
                 break
         frames.append(best)
-    return np.concatenate(frames, axis=-1)  # H, W, 3 * FRAME_STACK_N
+    return np.concatenate(frames, axis=-1)  # H, W, 3 * frame_stack_n
 
 
 def quantize_input(img_float_nhwc, scale, zero_point):
@@ -395,6 +395,20 @@ def main():
         output_name = hef.get_output_vstream_infos()[0].name
         input_scale = input_info.quant_info.qp_scale
         input_zero_point = input_info.quant_info.qp_zp
+
+        # The HEF's own input shape tells us whether this model was trained
+        # classic (single frame, data_recorder.py --legacy - no temporal
+        # input) or on a timestamped dataset (frame-stacked, the trainer's
+        # default) - see trainer/engine/train.py's build_model(). Detecting
+        # it here means this script doesn't need a separate flag to keep in
+        # sync with whatever model happens to be dropped in this folder.
+        input_channels = input_info.shape[-1]
+        if input_channels % 3 != 0:
+            raise RuntimeError(f"Unexpected HEF input shape {input_info.shape} - "
+                                f"channel count must be a multiple of 3 (RGB frames).")
+        frame_stack_n = input_channels // 3
+        print(f"[Hailo] Input: {input_info.shape}  ->  "
+              f"{'classic, single-frame' if frame_stack_n == 1 else f'{frame_stack_n}-frame stacked'} model")
 
         # --- I2C / PCA9685 --------------------------------------------------
         i2c = busio.I2C(board.SCL, board.SDA)
@@ -470,15 +484,17 @@ def main():
 
                         img_float = preprocess(frame)
                         now = time.time()
-                        frame_history.append((now, img_float))
-                        # Keep only what build_frame_stack() could possibly need, plus a
-                        # margin - bounds memory without needing a fixed-count maxlen
-                        # (capture fps can vary a bit frame to frame).
-                        cutoff = now - (FRAME_STACK_N - 1) * FRAME_STACK_GAP_SECONDS - 0.5
-                        while len(frame_history) > 1 and frame_history[0][0] < cutoff:
-                            frame_history.popleft()
-
-                        stack = build_frame_stack(frame_history, now)
+                        if frame_stack_n > 1:
+                            frame_history.append((now, img_float))
+                            # Keep only what build_frame_stack() could possibly need, plus
+                            # a margin - bounds memory without needing a fixed-count maxlen
+                            # (capture fps can vary a bit frame to frame).
+                            cutoff = now - (frame_stack_n - 1) * FRAME_STACK_GAP_SECONDS - 0.5
+                            while len(frame_history) > 1 and frame_history[0][0] < cutoff:
+                                frame_history.popleft()
+                            stack = build_frame_stack(frame_history, now, frame_stack_n)
+                        else:
+                            stack = img_float  # classic model - no temporal history needed
                         inp = quantize_input(stack[np.newaxis], input_scale, input_zero_point)
                         result = pipeline.infer({input_name: inp})
                         raw_label = float(np.array(result[output_name]).reshape(-1)[0])

@@ -22,7 +22,7 @@ import cv2
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 import torchvision.models as models
 
 IMG_SIZE = 224  # must match main.py's MODEL_SIZE
@@ -85,19 +85,34 @@ def load_and_preprocess(path, flip=False, brightness=1.0):
     return img  # HWC float32, RGB, normalized
 
 
+# ── Dataset format detection ─────────────────────────────────────────────
+# data_recorder.py can record two formats (its --legacy flag): "classic"
+# (image_path + steering_angle only) or the current default, timestamped
+# (adds a "timestamp" field per frame, needed for frame-stacked temporal
+# input - see FRAME_STACK_N above). Detect which one a given dataset is so
+# training/export/inference can all agree on it without a separate config
+# flag to keep in sync - main.py does the equivalent detection at inference
+# time by reading the compiled HEF's own input channel count.
+
+def _detect_format(records):
+    """Returns True if this is a timestamped (frame-stackable) dataset,
+    False if it's classic (single-frame, no timestamps)."""
+    has_ts = [("timestamp" in r) for r in records]
+    if all(has_ts):
+        return True
+    if not any(has_ts):
+        return False
+    raise ValueError(
+        "This dataset mixes records with and without a 'timestamp' field - "
+        "can't tell whether it's classic (single-frame) or timestamped "
+        "(frame-stacked). Don't combine recordings made with and without "
+        "data_recorder.py's --legacy flag in the same driving_log.json."
+    )
+
+
 # ── Frame-stack assembly - shared by SteeringDataset and
 # save_calibration_data, so the temporal lookback logic can't drift between
 # the two ────────────────────────────────────────────────────────────────
-
-def _require_timestamps(records):
-    if any("timestamp" not in r for r in records):
-        raise ValueError(
-            "This dataset has records without a 'timestamp' field - frame "
-            "stacking needs it to know which frames are close in time. "
-            "Re-record with the current data_recorder.py (it now stamps "
-            "every frame), or use an older trainer build for this dataset."
-        )
-
 
 def _history_indices(records_sorted, idx, n=FRAME_STACK_N, gap=FRAME_STACK_GAP_SECONDS):
     """
@@ -110,7 +125,12 @@ def _history_indices(records_sorted, idx, n=FRAME_STACK_N, gap=FRAME_STACK_GAP_S
     drive), stops there and pads by repeating the last valid frame found -
     same fallback main.py uses live when it hasn't captured enough history
     yet (e.g. right after startup).
+
+    n=1 (classic, single-frame datasets) short-circuits before touching
+    "timestamp" at all - classic records don't have that field.
     """
+    if n == 1:
+        return [idx]
     cur_ts = records_sorted[idx]["timestamp"]
     result = [idx]
     for k in range(1, n):
@@ -155,13 +175,26 @@ def _chunk_indices(records_sorted, block_seconds=SPLIT_BLOCK_SECONDS):
     return chunks
 
 
-def _load_stack(records_sorted, idx, data_root, flip=False, brightness=1.0):
-    indices = _history_indices(records_sorted, idx)
+CLASSIC_SPLIT_BLOCK_FRAMES = 90  # classic-format datasets have no timestamps,
+                                  # so unlike _chunk_indices above, near-
+                                  # duplicate frames are grouped into
+                                  # train/val blocks by a fixed frame count
+                                  # (assuming driving_log.json stays in
+                                  # capture order) instead of wall-clock time.
+
+
+def _chunk_indices_by_count(records_sorted, block_frames=CLASSIC_SPLIT_BLOCK_FRAMES):
+    return [list(range(i, min(i + block_frames, len(records_sorted))))
+            for i in range(0, len(records_sorted), block_frames)]
+
+
+def _load_stack(records_sorted, idx, data_root, flip=False, brightness=1.0, n=FRAME_STACK_N):
+    indices = _history_indices(records_sorted, idx, n=n)
     frames = [
         load_and_preprocess(data_root / records_sorted[i]["image_path"], flip=flip, brightness=brightness)
         for i in indices
     ]
-    return np.concatenate(frames, axis=-1)  # H, W, 3 * FRAME_STACK_N
+    return np.concatenate(frames, axis=-1)  # H, W, 3 * n
 
 
 # ── Dataset ─────────────────────────────────────────────────────────────
@@ -175,11 +208,12 @@ class SteeringDataset(Dataset):
     of those records are actually this split's targets.
     """
 
-    def __init__(self, records_sorted, sample_indices, data_root, augment=False):
+    def __init__(self, records_sorted, sample_indices, data_root, augment=False, frame_stack_n=FRAME_STACK_N):
         self.records_sorted = records_sorted
         self.sample_indices = sample_indices
         self.data_root = Path(data_root)
         self.augment = augment
+        self.frame_stack_n = frame_stack_n
 
     def __len__(self):
         return len(self.sample_indices)
@@ -194,31 +228,55 @@ class SteeringDataset(Dataset):
         if flip:
             angle = -angle
 
-        stack = _load_stack(self.records_sorted, idx, self.data_root, flip=flip, brightness=brightness)
+        stack = _load_stack(self.records_sorted, idx, self.data_root, flip=flip, brightness=brightness,
+                             n=self.frame_stack_n)
         tensor = torch.from_numpy(stack.transpose(2, 0, 1).copy())  # HWC -> CHW
         return tensor, torch.tensor(angle, dtype=torch.float32)
+
+
+# ── Class-imbalance handling ────────────────────────────────────────────
+# Real driving logs are dominated by near-zero steering (most of a drive is
+# straight road) - e.g. one recorded set here is 74% exactly angle==0.0 and
+# only ~2% sharp turns (|angle|>0.6). Plain MSE weights every frame equally,
+# so the loss is minimized almost entirely by getting the abundant straight
+# frames right; the rare turn frames barely move the gradient and the model
+# converges to predicting near-zero for everything. Fix: oversample rare
+# steering magnitudes during training so each bucket contributes roughly
+# equally to what the model sees per epoch. Only applied to the train split -
+# val keeps the true distribution so val MSE stays a meaningful, comparable
+# metric across runs.
+_BALANCE_BIN_EDGES = [0.0, 0.001, 0.1, 0.3, 0.6, 1.0 + 1e-6]
+
+
+def _balanced_sample_weights(records_sorted, sample_indices):
+    angles = np.abs([records_sorted[i]["steering_angle"] for i in sample_indices])
+    bin_idx = np.digitize(angles, _BALANCE_BIN_EDGES[1:-1])
+    counts = np.bincount(bin_idx, minlength=len(_BALANCE_BIN_EDGES) - 1)
+    weights = 1.0 / counts[bin_idx]
+    return torch.as_tensor(weights, dtype=torch.double)
 
 
 # ── Model - proven to compile cleanly with the Hailo DFC and match what
 # main.py expects (single input, single float output) ─────────────────
 
-def build_model():
+def build_model(frame_stack_n=FRAME_STACK_N):
     m = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
 
-    in_ch = 3 * FRAME_STACK_N
+    in_ch = 3 * frame_stack_n
     if in_ch != m.conv1.in_channels:
         # Widen the first conv to accept the stacked input. Tile the
         # pretrained 3-channel filters across the extra copies and divide by
-        # FRAME_STACK_N, so a stack of similar-looking frames produces a
+        # frame_stack_n, so a stack of similar-looking frames produces a
         # first-conv output at roughly the scale the pretrained BatchNorm
         # right after it was calibrated for - otherwise each extra copy adds
         # fully to the sum and the activation statistics start out badly off
-        # from what the rest of the pretrained network expects.
+        # from what the rest of the pretrained network expects. Classic
+        # (frame_stack_n=1) datasets skip this entirely - in_ch is already 3.
         old_conv1 = m.conv1
         new_conv1 = nn.Conv2d(in_ch, old_conv1.out_channels, kernel_size=old_conv1.kernel_size,
                                stride=old_conv1.stride, padding=old_conv1.padding, bias=False)
         with torch.no_grad():
-            new_conv1.weight.copy_(old_conv1.weight.repeat(1, FRAME_STACK_N, 1, 1) / FRAME_STACK_N)
+            new_conv1.weight.copy_(old_conv1.weight.repeat(1, frame_stack_n, 1, 1) / frame_stack_n)
         m.conv1 = new_conv1
 
     m.fc = nn.Sequential(
@@ -263,7 +321,7 @@ def _eval_epoch(model, loader, device):
 
 # ── ONNX export ─────────────────────────────────────────────────────────
 
-def export_onnx(model, device, path):
+def export_onnx(model, device, path, frame_stack_n=FRAME_STACK_N):
     """
     dynamo=False forces the old TorchScript-based exporter, which honors
     opset_version directly. Without it, newer PyTorch (2.5+) defaults to
@@ -275,7 +333,7 @@ def export_onnx(model, device, path):
     the old exporter instead of fighting the downgrade converter.
     """
     model.eval()
-    dummy = torch.zeros(1, 3 * FRAME_STACK_N, IMG_SIZE, IMG_SIZE, device=device)
+    dummy = torch.zeros(1, 3 * frame_stack_n, IMG_SIZE, IMG_SIZE, device=device)
     torch.onnx.export(
         model, dummy, str(path),
         export_params=True, opset_version=13, do_constant_folding=True,
@@ -290,12 +348,14 @@ def export_onnx(model, device, path):
 # NHWC (what the DFC wants), so compile.sh doesn't need a separate
 # transpose step ───────────────────────────────────────────────────────
 
-def save_calibration_data(records, data_root, out_path, n=CALIB_N):
-    _require_timestamps(records)
-    records_sorted = sorted(records, key=lambda r: r["timestamp"])
+def save_calibration_data(records, data_root, out_path, n=CALIB_N, frame_stack_n=FRAME_STACK_N):
+    if frame_stack_n > 1:
+        records_sorted = sorted(records, key=lambda r: r["timestamp"])
+    else:
+        records_sorted = records  # no timestamps to sort by - order doesn't matter, single-frame
     sample_idx = random.sample(range(len(records_sorted)), min(n, len(records_sorted)))
-    arrays = [_load_stack(records_sorted, i, Path(data_root)) for i in sample_idx]
-    calib = np.stack(arrays).astype(np.float32)  # (N, H, W, 3 * FRAME_STACK_N)
+    arrays = [_load_stack(records_sorted, i, Path(data_root), n=frame_stack_n) for i in sample_idx]
+    calib = np.stack(arrays).astype(np.float32)  # (N, H, W, 3 * frame_stack_n)
     np.save(str(out_path), calib)
 
 
@@ -413,11 +473,15 @@ def run_smoke_test(config, push=None):
         push({"type": "log", "level": "error", "text": "No valid images found in the dataset - need at least 1."})
         push({"type": "done"})
         return
+    is_stacked = _detect_format(records)
+    frame_stack_n = FRAME_STACK_N if is_stacked else 1
+    push({"type": "log", "level": "info",
+          "text": f"Dataset format: {'timestamped, ' + str(FRAME_STACK_N) + '-frame stack' if is_stacked else 'classic, single-frame'}."})
     push({"type": "log", "level": "info", "text": f"Using {min(5, len(records))} of {len(records)} images for calibration (untrained model - this only tests the pipeline, not accuracy)."})
 
     MODELS_DIR.mkdir(exist_ok=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = build_model().to(device)  # random/pretrained-backbone weights, 0 epochs of fine-tuning
+    model = build_model(frame_stack_n).to(device)  # random/pretrained-backbone weights, 0 epochs of fine-tuning
     model.eval()
 
     ckpt_path = MODELS_DIR / f"{SMOKE_TEST_NAME}.pth"
@@ -425,11 +489,11 @@ def run_smoke_test(config, push=None):
 
     onnx_path = MODELS_DIR / f"{SMOKE_TEST_NAME}.onnx"
     push({"type": "log", "level": "info", "text": "Exporting ONNX..."})
-    export_onnx(model, device, onnx_path)
+    export_onnx(model, device, onnx_path, frame_stack_n)
     push({"type": "log", "level": "success", "text": "ONNX export OK."})
 
     calib_path = MODELS_DIR / f"{SMOKE_TEST_NAME}_calib_data_nhwc.npy"
-    save_calibration_data(records, data_root, calib_path, n=5)
+    save_calibration_data(records, data_root, calib_path, n=5, frame_stack_n=frame_stack_n)
 
     ok = compile_hef(SMOKE_TEST_NAME, push)
     if ok:
@@ -488,13 +552,23 @@ def run(config, push=None, should_stop=None):
         push({"type": "log", "level": "error", "text": "Not enough valid samples to train."})
         return
 
-    _require_timestamps(records)
-    # records_sorted stays intact (full, time-ordered) so any sample can look
-    # back for stack history regardless of which split it landed in - only
-    # whole time-blocks get shuffled and split into train/val (see
-    # _chunk_indices - keeps near-duplicate frames on the same side).
-    records_sorted = sorted(records, key=lambda r: r["timestamp"])
-    chunks = _chunk_indices(records_sorted)
+    is_stacked = _detect_format(records)
+    frame_stack_n = FRAME_STACK_N if is_stacked else 1
+    push({"type": "log", "level": "info",
+          "text": f"Dataset format: {'timestamped, ' + str(FRAME_STACK_N) + '-frame stack' if is_stacked else 'classic, single-frame'}."})
+
+    if is_stacked:
+        # records_sorted stays intact (full, time-ordered) so any sample can
+        # look back for stack history regardless of which split it landed in
+        # - only whole time-blocks get shuffled and split into train/val
+        # (see _chunk_indices - keeps near-duplicate frames on the same side).
+        records_sorted = sorted(records, key=lambda r: r["timestamp"])
+        chunks = _chunk_indices(records_sorted)
+    else:
+        # No timestamps to sort/group by - driving_log.json is already in
+        # capture order, so fixed-size index blocks stand in for time blocks.
+        records_sorted = records
+        chunks = _chunk_indices_by_count(records_sorted)
     random.shuffle(chunks)
     total = len(records_sorted)
     train_target = int(0.8 * total)
@@ -508,12 +582,14 @@ def run(config, push=None, should_stop=None):
         # else: leftover chunks held out, unused - same as before
     push({"type": "split", "train": len(train_idx), "val": len(val_idx), "total": len(records_sorted)})
 
-    train_ld = DataLoader(SteeringDataset(records_sorted, train_idx, data_root, augment=True),
-                           batch_size=batch_size, shuffle=True, num_workers=0)
-    val_ld = DataLoader(SteeringDataset(records_sorted, val_idx, data_root, augment=False),
+    train_weights = _balanced_sample_weights(records_sorted, train_idx)
+    train_sampler = WeightedRandomSampler(train_weights, num_samples=len(train_idx), replacement=True)
+    train_ld = DataLoader(SteeringDataset(records_sorted, train_idx, data_root, augment=True, frame_stack_n=frame_stack_n),
+                           batch_size=batch_size, sampler=train_sampler, num_workers=0)
+    val_ld = DataLoader(SteeringDataset(records_sorted, val_idx, data_root, augment=False, frame_stack_n=frame_stack_n),
                          batch_size=batch_size, shuffle=False, num_workers=0)
 
-    model = build_model().to(device)
+    model = build_model(frame_stack_n).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
     best_val = float("inf")
@@ -540,11 +616,11 @@ def run(config, push=None, should_stop=None):
 
     onnx_path = MODELS_DIR / f"{model_name}.onnx"
     push({"type": "log", "level": "info", "text": "Exporting ONNX..."})
-    export_onnx(model, device, onnx_path)
+    export_onnx(model, device, onnx_path, frame_stack_n)
 
     calib_path = MODELS_DIR / f"{model_name}_calib_data_nhwc.npy"
     push({"type": "log", "level": "info", "text": "Saving calibration data..."})
-    save_calibration_data(records, data_root, calib_path)
+    save_calibration_data(records, data_root, calib_path, frame_stack_n=frame_stack_n)
 
     ok = compile_hef(model_name, push)
     if ok:
@@ -574,6 +650,15 @@ def retry_compile(config, push=None):
     calib_path = MODELS_DIR / f"{model_name}_calib_data_nhwc.npy"
     ckpt_path = MODELS_DIR / f"{model_name}.pth"
 
+    # frame_stack_n isn't stored anywhere separately - the checkpoint's own
+    # conv1 weight shape is the authoritative record of what it was actually
+    # trained/exported with (classic vs timestamped dataset), so read it back
+    # from there instead of re-deriving it and risking it drifting out of
+    # sync with what's actually in the .pth.
+    frame_stack_n = None
+    if ckpt_path.exists():
+        frame_stack_n = torch.load(ckpt_path, map_location="cpu")["conv1.weight"].shape[1] // 3
+
     if not onnx_path.exists():
         if not ckpt_path.exists():
             push({"type": "log", "level": "error",
@@ -582,10 +667,10 @@ def retry_compile(config, push=None):
             return
         push({"type": "log", "level": "warning", "text": f"{onnx_path} missing - re-exporting from {ckpt_path.name}..."})
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model = build_model().to(device)
+        model = build_model(frame_stack_n).to(device)
         model.load_state_dict(torch.load(ckpt_path, map_location=device))
         model.eval()
-        export_onnx(model, device, onnx_path)
+        export_onnx(model, device, onnx_path, frame_stack_n)
         push({"type": "log", "level": "success", "text": "Re-exported ONNX."})
 
     if not calib_path.exists():
@@ -607,7 +692,9 @@ def retry_compile(config, push=None):
             records = json.load(f)
         data_root = json_path.parent
         records = [r for r in records if (data_root / r["image_path"]).exists()]
-        save_calibration_data(records, data_root, calib_path)
+        if frame_stack_n is None:  # no checkpoint to read it from - fall back to the dataset itself
+            frame_stack_n = FRAME_STACK_N if _detect_format(records) else 1
+        save_calibration_data(records, data_root, calib_path, frame_stack_n=frame_stack_n)
         push({"type": "log", "level": "success", "text": "Regenerated calibration data."})
 
     if not check_compile_prereqs(push):

@@ -65,6 +65,7 @@ never block reading the controller or updating the ESC/servo again.
 --------------------------------------------------------------------------
 """
 
+import argparse
 import json
 import logging
 import os
@@ -289,10 +290,17 @@ WRITE_QUEUE_MAXSIZE = 400  # ~5s of buffering at 80fps before frames start
                             # SD card stall without ever blocking the caller
 
 
-def _writer_loop(write_queue, driving_log, frames_dir):
+def _writer_loop(write_queue, driving_log, frames_dir, legacy_format):
     """Runs on a background thread for the whole program lifetime. The only
     thing that ever touches disk for a recorded frame - see the module
-    docstring for why this isn't inline in the control loop."""
+    docstring for why this isn't inline in the control loop.
+
+    legacy_format=True omits "timestamp" from each record (classic format:
+    just image_path + steering_angle). The trainer (trainer/engine/train.py)
+    detects which format a dataset is by whether "timestamp" is present, and
+    picks single-frame vs frame-stacked training accordingly - main.py does
+    the equivalent detection at inference time from the compiled model's own
+    input shape. See --legacy's help text below for why you'd choose either."""
     while True:
         item = write_queue.get()
         if item is None:  # sentinel - drain requested, stop
@@ -300,11 +308,13 @@ def _writer_loop(write_queue, driving_log, frames_dir):
             return
         image_filename, saved_frame, steering_label, ts = item
         cv2.imwrite(os.path.join(frames_dir, image_filename), saved_frame)
-        driving_log.append({
+        record = {
             "image_path": f"{os.path.basename(frames_dir)}/{image_filename}",
             "steering_angle": steering_label,
-            "timestamp": ts,
-        })
+        }
+        if not legacy_format:
+            record["timestamp"] = ts
+        driving_log.append(record)
         write_queue.task_done()
 
 
@@ -345,6 +355,16 @@ def _handle_sigterm(signum, frame):
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--legacy", action="store_true",
+                     help="Record in the classic format (image_path + steering_angle "
+                          "only, no timestamp). The default records a 'timestamp' per "
+                          "frame too, which the trainer needs for frame-stacked "
+                          "temporal input (see trainer/engine/train.py) - use --legacy "
+                          "only if you specifically want single-frame training/inference.")
+    args = ap.parse_args()
+    legacy_format = args.legacy
+
     signal.signal(signal.SIGTERM, _handle_sigterm)
 
     pca = None
@@ -355,13 +375,28 @@ def main():
     driving_log = load_driving_log()
     frame_index = next_frame_index()
 
+    if driving_log:
+        # Keep one driving_log.json internally consistent - a dataset that
+        # mixes records with and without "timestamp" can't be reliably
+        # trained (train.py's _detect_format() would just reject it), so an
+        # existing log's format wins over a mismatched --legacy flag rather
+        # than silently corrupting it.
+        existing_legacy = not any("timestamp" in r for r in driving_log)
+        if existing_legacy != legacy_format:
+            print(f"Atentie: {os.path.basename(LOG_JSON_PATH)} exista deja in format "
+                  f"{'CLASIC (fara timestamp)' if existing_legacy else 'CU TIMESTAMP'} - "
+                  f"continui in acelasi format ca sa nu amestec formate in acelasi fisier.")
+            legacy_format = existing_legacy
+
+    print(f"Format de inregistrare: {'CLASIC (fara timestamp)' if legacy_format else 'CU TIMESTAMP (frame-stacking posibil la antrenare)'}")
+
     # Started unconditionally (even before recording ever starts) and kept
     # running for the whole program - idle-waiting on an empty queue costs
     # nothing. See _writer_loop()/module docstring for why frame writes
     # don't happen inline in the control loop below.
     write_queue = queue.Queue(maxsize=WRITE_QUEUE_MAXSIZE)
     writer_thread = threading.Thread(
-        target=_writer_loop, args=(write_queue, driving_log, FRAMES_DIR), daemon=True)
+        target=_writer_loop, args=(write_queue, driving_log, FRAMES_DIR, legacy_format), daemon=True)
     writer_thread.start()
 
     try:

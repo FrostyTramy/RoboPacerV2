@@ -1,0 +1,15 @@
+[Unit]
+Description=RoboPacerV2 emergency-stop listener (ESP32 over USB serial)
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/pi/RoboPacerV2/safety/estop_listener.py
+Restart=always
+RestartSec=2
+User=pi
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

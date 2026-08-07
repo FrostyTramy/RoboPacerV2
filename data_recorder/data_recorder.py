@@ -81,7 +81,7 @@ import cv2
 import numpy as np
 from adafruit_motor import servo as adafruit_servo
 from adafruit_pca9685 import PCA9685
-from evdev import InputDevice, ecodes, list_devices
+from evdev import InputDevice, ecodes, ff, list_devices
 from picamera2 import Picamera2
 
 # ---------------------------------------------------------------------------
@@ -153,6 +153,15 @@ AXIS_CENTER = 32767
 AXIS_MAX = 65535
 
 
+# Transient I2C bus faults worth logging-and-continuing instead of crashing a
+# multi-hour recording session over: 121 (Remote I/O error - device didn't
+# ACK) and 19 (No such device - the device briefly vanished from the bus
+# entirely). Both are typically a momentary bus/wiring glitch on a vibrating
+# RC chassis - loose SDA/SCL/power wiring to the PCA9685, or motor/ESC
+# electrical noise - not something the program should die over.
+_TRANSIENT_I2C_ERRNOS = (121, 19)
+
+
 class SteeringServo:
     """Servo on the PCA9685, with I2C-error handling centralized here."""
 
@@ -171,8 +180,8 @@ class SteeringServo:
         try:
             self._servo.angle = angle
         except OSError as e:
-            if e.errno == 121:
-                logging.warning(f"I2C error setting servo angle {angle}")
+            if e.errno in _TRANSIENT_I2C_ERRNOS:
+                logging.warning(f"I2C error setting servo angle {angle}: {e}")
             else:
                 raise
 
@@ -183,7 +192,7 @@ class SteeringServo:
         try:
             self._servo.angle = None
         except OSError as e:
-            if e.errno != 121:
+            if e.errno not in _TRANSIENT_I2C_ERRNOS:
                 raise
 
 
@@ -205,8 +214,8 @@ class ESC:
         try:
             self._channel.duty_cycle = self._pulse_to_duty_cycle(pulse_us)
         except OSError as e:
-            if e.errno == 121:
-                logging.warning(f"I2C error setting ESC pulse {pulse_us}")
+            if e.errno in _TRANSIENT_I2C_ERRNOS:
+                logging.warning(f"I2C error setting ESC pulse {pulse_us}: {e}")
             else:
                 raise
 
@@ -218,7 +227,7 @@ class ESC:
         try:
             self._channel.duty_cycle = 0
         except OSError as e:
-            if e.errno != 121:
+            if e.errno not in _TRANSIENT_I2C_ERRNOS:
                 raise
 
     def arm(self):
@@ -362,8 +371,12 @@ def main():
                           "frame too, which the trainer needs for frame-stacked "
                           "temporal input (see trainer/engine/train.py) - use --legacy "
                           "only if you specifically want single-frame training/inference.")
+    ap.add_argument("--display", action="store_true",
+                     help="Open a live cv2 preview window (costs a few ms/frame). "
+                          "Default is headless - status is printed to the console instead.")
     args = ap.parse_args()
     legacy_format = args.legacy
+    show_display = args.display
 
     signal.signal(signal.SIGTERM, _handle_sigterm)
 
@@ -374,6 +387,40 @@ def main():
     controller = None
     driving_log = load_driving_log()
     frame_index = next_frame_index()
+
+    last_rumble_effect_id = None
+
+    def rumble(duration_ms):
+        """One-shot rumble, non-blocking - the controller plays it on its own
+        timer while the caller keeps running (no time.sleep() needed here,
+        same reasoning as why frame writes moved off the control loop - see
+        module docstring). Xbox pads only have a handful of FF effect slots,
+        so the previous effect is erased before uploading the next one -
+        otherwise a long session full of start/pause/resume presses would
+        eventually exhaust them and go silent. Defined here (before
+        `controller` is ever assigned) rather than after find_xbox_controller()
+        succeeds, so it's always safe to call from the shutdown/finally path
+        too, even if startup failed before a controller was found."""
+        nonlocal last_rumble_effect_id
+        if controller is None:
+            return
+        if last_rumble_effect_id is not None:
+            try:
+                controller.erase_effect(last_rumble_effect_id)
+            except OSError:
+                pass
+            last_rumble_effect_id = None
+        try:
+            effect = ff.Effect(
+                ecodes.FF_RUMBLE, -1, 0,
+                ff.Trigger(0, 0),
+                ff.Replay(duration_ms, 0),
+                ff.EffectType(ff_rumble_effect=ff.Rumble(strong_magnitude=0xFFFF, weak_magnitude=0xFFFF)),
+            )
+            last_rumble_effect_id = controller.upload_effect(effect)
+            controller.write(ecodes.EV_FF, last_rumble_effect_id, 1)
+        except OSError as e:
+            logging.warning(f"Rumble esuat: {e}")
 
     if driving_log:
         # Keep one driving_log.json internally consistent - a dataset that
@@ -426,6 +473,10 @@ def main():
         print("Apasa [A] pentru a INCEPE INREGISTRAREA/RESUME.")
         print("Apasa [Y] pentru a PAUZA inregistrarea.")
         print("Apasa [B] pentru a OPRI si SALVA log-ul.")
+        if show_display:
+            print("Apasa 'q' in fereastra pentru oprire (sau [B] pe controller).")
+        else:
+            print("Mod headless (fara fereastra). Ctrl+C sau [B] pe controller pentru oprire.")
         print("-----------------------------------------------------")
 
         gas_value = 0
@@ -453,17 +504,23 @@ def main():
                         elif abs_name == "ABS_X":
                             steering_axis_raw = event.value
                             angle = steering_axis_to_angle(event.value)
-                            steering.set_angle(SERVO_NEUTRAL_ANGLE + SERVO_OFFSET if is_paused else angle)
+                            # Servo follows the stick even while paused - pause only
+                            # stops writing to disk, not driving. Lets you steer the
+                            # car (e.g. off-track for deliberate recovery-data setup)
+                            # without it being recorded, then hit Resume to start
+                            # capturing the correction back.
+                            steering.set_angle(angle)
 
                         if abs_name in ("ABS_GAS", "ABS_BRAKE"):
                             pulse = ESC.pulse_from_gas_brake(gas_value, brake_value)
-                            esc.set_pulse_us(ESC_NEUTRAL_US if is_paused else pulse)
+                            esc.set_pulse_us(pulse)
 
                     elif event.type == ecodes.EV_KEY and event.value == 1:
                         if event.code == BTN_START_RECORDING:
                             if is_paused:
                                 is_paused = False
                                 print("\n>>> RESUME (A) <<<")
+                                rumble(500)
                             elif not is_recording:
                                 is_recording = True
                                 start_time_fps = time.time()
@@ -472,9 +529,15 @@ def main():
                         elif event.code == BTN_PAUSE:
                             if is_recording and not is_paused:
                                 is_paused = True
+                                # One-off safety snap to neutral/center the instant
+                                # pause is pressed (in case your hand was mid-motion
+                                # on the stick) - after this, the stick drives
+                                # normally again, same as unpaused (see ABS_X/ABS_GAS
+                                # handling above).
                                 esc.neutral()
                                 steering.center()
                                 print("\n>>> PAUZA (Y) <<<")
+                                rumble(1000)
                         elif event.code == BTN_SAVE_AND_STOP:
                             raise KeyboardInterrupt
 
@@ -508,23 +571,24 @@ def main():
                 )
                 frame_index += 1
 
-            display = frame
-            status, color = "OFF", (0, 0, 255)
-            if is_recording and is_paused:
-                status, color = "PAUZA (Y)", (255, 255, 0)
-            elif is_recording:
-                status, color = "REC (A)", (0, 255, 0)
+            if show_display:
+                display = frame
+                status, color = "OFF", (0, 0, 255)
+                if is_recording and is_paused:
+                    status, color = "PAUZA (Y)", (255, 255, 0)
+                elif is_recording:
+                    status, color = "REC (A)", (0, 255, 0)
 
-            cv2.putText(display, f"Stare: {status} | Viraj: {steering_label:+.2f}", (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA)
-            if current_fps > 0:
-                cv2.putText(display, f"FPS: {current_fps:.1f} | Cadre: {len(driving_log)}",
-                            (10, display.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
-                            (255, 255, 0), 2, cv2.LINE_AA)
-            cv2.imshow("RoboPacerV2 - Data Recorder", display)
+                cv2.putText(display, f"Stare: {status} | Viraj: {steering_label:+.2f}", (10, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA)
+                if current_fps > 0:
+                    cv2.putText(display, f"FPS: {current_fps:.1f} | Cadre: {len(driving_log)}",
+                                (10, display.shape[0] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
+                                (255, 255, 0), 2, cv2.LINE_AA)
+                cv2.imshow("RoboPacerV2 - Data Recorder", display)
 
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                raise KeyboardInterrupt
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    raise KeyboardInterrupt
 
     except (KeyboardInterrupt, ConnectionError) as e:
         if isinstance(e, ConnectionError):
@@ -552,10 +616,28 @@ def main():
         if esc is not None:
             time.sleep(0.1)
             esc.stop()
+            # Two short pulses = "program stopped" - the controller's own
+            # timer plays each one, so these sleeps are just spacing/letting
+            # them finish before the fd potentially closes on process exit
+            # (this is shutdown cleanup, not the control loop, so blocking
+            # briefly here doesn't cost anything).
+            rumble(150)
+            time.sleep(0.25)
+            rumble(150)
+            time.sleep(0.2)
         if steering is not None:
             steering.release()
         if pca is not None:
-            pca.deinit()
+            try:
+                pca.deinit()
+            except OSError as e:
+                # Unlike SteeringServo/ESC above, adafruit_pca9685's own
+                # deinit()/reset() does a raw I2C write with no error
+                # handling of its own - if the bus is already unstable
+                # (see _TRANSIENT_I2C_ERRNOS), this would otherwise crash
+                # cleanup itself instead of just skipping a courtesy reset
+                # on a program that's already shutting down.
+                logging.warning(f"I2C error during pca.deinit(): {e}")
         if picam2 is not None and getattr(picam2, "started", False):
             picam2.stop()
         cv2.destroyAllWindows()

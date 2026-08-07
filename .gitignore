@@ -16,6 +16,11 @@ data_recorder/set1/
 camera/records/
 trainer/models/
 trainer/engine/compile/resources/
+set*/
+Pista-biciclete/
+
+# Garmin ConnectIQ app (build artifacts + source — nu merge pe github)
+Esp32/ConnectIQ/
 
 # Logs
 *.log

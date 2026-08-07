@@ -28,8 +28,9 @@
 BLECharacteristic* pWriteChar   = nullptr;
 BLECharacteristic* pStatusChar  = nullptr;
 BLECharacteristic* pScriptsChar = nullptr;
-bool authenticated = false;
-bool relayOn       = false;
+bool authenticated    = false;
+bool relayOn          = false;
+bool scriptLaunched   = false;
 
 // Watchdog
 unsigned long lastHeartbeatMs = 0;
@@ -55,7 +56,8 @@ class ServerCallbacks : public BLEServerCallbacks {
         Serial.println("[BLE] Conectat, astept autentificare...");
     }
     void onDisconnect(BLEServer* pServer) override {
-        authenticated = false;
+        authenticated    = false;
+        scriptLaunched   = false;
         Serial.println("[BLE] Deconectat, reincep advertising...");
         pServer->getAdvertising()->start();
     }
@@ -99,12 +101,16 @@ class CharCallbacks : public BLECharacteristicCallbacks {
             case BTN_LAP:   Serial.println("BUTON: LAP");                             break;
             case BTN_ENTER: Serial.println("BUTON: ENTER");                           break;
             case CMD_STOP:
+                if (!scriptLaunched) { Serial.println("[SCRIPTS] STOP ignorat (niciun script activ)"); break; }
+                scriptLaunched = false;
                 Serial.println("[SCRIPTS] STOP");
                 Serial.println("!!STOP!!");
                 break;
             case CMD_RUN:
+                if (scriptLaunched) { Serial.println("[SCRIPTS] RUN ignorat (deja lansat)"); break; }
                 if (val.length() >= 2) {
                     uint8_t idx = (uint8_t)val[1];
+                    scriptLaunched = true;
                     Serial.printf("[SCRIPTS] RUN %d\n", idx);
                     onRunScript(idx);
                 }
@@ -118,9 +124,11 @@ class CharCallbacks : public BLECharacteristicCallbacks {
 
 void onButtonPress(uint8_t btn) {
     if (btn == BTN_UP) {
+        if (relayOn) { Serial.println("[RELAY] UP ignorat (deja ON)"); return; }
         updateRelayState(true);
         Serial.println("[RELAY] ON");
     } else if (btn == BTN_DOWN) {
+        if (!relayOn) { Serial.println("[RELAY] DOWN ignorat (deja OFF)"); return; }
         updateRelayState(false);
         Serial.println("[RELAY] OFF");
         Serial.println("!!ESTOP!!");
@@ -195,6 +203,7 @@ void loop() {
                 Serial.println("[RELAY] ON via serial");
             } else if (serialBuf.equals("!!OFF!!")) {
                 updateRelayState(false);
+                scriptLaunched = false;
                 Serial.println("[RELAY] OFF via serial");
             } else if (serialBuf.startsWith("!!SCRIPTS!!")) {
                 String data = serialBuf.substring(11); // dupa "!!SCRIPTS!!"

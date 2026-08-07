@@ -187,6 +187,15 @@ DISPLAY_EVERY_N_FRAMES = 4  # cv2.imshow costs ~4-5ms/call - update it less ofte
                              # the single biggest avoidable per-frame cost)
 
 
+# Transient I2C bus faults worth logging-and-continuing instead of crashing
+# an autonomous drive over: 121 (Remote I/O error - device didn't ACK) and 19
+# (No such device - the device briefly vanished from the bus entirely). Both
+# are typically a momentary bus/wiring glitch on a vibrating RC chassis -
+# loose SDA/SCL/power wiring to the PCA9685, or motor/ESC electrical noise -
+# not something the program should die over.
+_TRANSIENT_I2C_ERRNOS = (121, 19)
+
+
 class SteeringServo:
     """Servo on the PCA9685, with I2C-error handling centralized here."""
 
@@ -205,8 +214,8 @@ class SteeringServo:
         try:
             self._servo.angle = angle
         except OSError as e:
-            if e.errno == 121:
-                logging.warning(f"I2C error setting servo angle {angle}")
+            if e.errno in _TRANSIENT_I2C_ERRNOS:
+                logging.warning(f"I2C error setting servo angle {angle}: {e}")
             else:
                 raise
 
@@ -217,7 +226,7 @@ class SteeringServo:
         try:
             self._servo.angle = None
         except OSError as e:
-            if e.errno != 121:
+            if e.errno not in _TRANSIENT_I2C_ERRNOS:
                 raise
 
 
@@ -239,8 +248,8 @@ class ESC:
         try:
             self._channel.duty_cycle = self._pulse_to_duty_cycle(pulse_us)
         except OSError as e:
-            if e.errno == 121:
-                logging.warning(f"I2C error setting ESC pulse {pulse_us}")
+            if e.errno in _TRANSIENT_I2C_ERRNOS:
+                logging.warning(f"I2C error setting ESC pulse {pulse_us}: {e}")
             else:
                 raise
 
@@ -252,7 +261,7 @@ class ESC:
         try:
             self._channel.duty_cycle = 0
         except OSError as e:
-            if e.errno != 121:
+            if e.errno not in _TRANSIENT_I2C_ERRNOS:
                 raise
 
     def arm(self):
@@ -551,7 +560,16 @@ def main():
         if steering is not None:
             steering.release()
         if pca is not None:
-            pca.deinit()
+            try:
+                pca.deinit()
+            except OSError as e:
+                # Unlike SteeringServo/ESC above, adafruit_pca9685's own
+                # deinit()/reset() does a raw I2C write with no error
+                # handling of its own - if the bus is already unstable
+                # (see _TRANSIENT_I2C_ERRNOS), this would otherwise crash
+                # cleanup itself instead of just skipping a courtesy reset
+                # on a program that's already shutting down.
+                logging.warning(f"I2C error during pca.deinit(): {e}")
         if picam2 is not None and getattr(picam2, "started", False):
             picam2.stop()
         cv2.destroyAllWindows()

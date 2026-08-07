@@ -13,6 +13,8 @@
 *.png
 *.mp4
 data_recorder/set1/
+data_recorder/set2/
+data_recorder/Pista-biciclete/
 camera/records/
 trainer/models/
 trainer/engine/compile/resources/

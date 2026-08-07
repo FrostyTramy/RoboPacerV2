@@ -61,6 +61,13 @@ class ServerCallbacks : public BLEServerCallbacks {
     }
 };
 
+class ScriptsReadCallbacks : public BLECharacteristicCallbacks {
+    void onRead(BLECharacteristic* pChar) override {
+        String val = pChar->getValue().c_str();
+        Serial.println("[DBG] SCRIPTS_CHAR citit de Garmin, valoare: '" + val + "' (" + val.length() + " bytes)");
+    }
+};
+
 class CharCallbacks : public BLECharacteristicCallbacks {
     void onWrite(BLECharacteristic* pChar) override {
         String val = pChar->getValue();
@@ -155,7 +162,9 @@ void setup() {
         SCRIPTS_CHAR_UUID,
         BLECharacteristic::PROPERTY_READ
     );
+    pScriptsChar->setCallbacks(new ScriptsReadCallbacks());
     pScriptsChar->setValue("");
+    Serial.println("[DBG] SCRIPTS_CHAR creat (gol, asteapta !!SCRIPTS!! de la RPi)");
 
     pService->start();
 
@@ -189,13 +198,17 @@ void loop() {
                 Serial.println("[RELAY] OFF via serial");
             } else if (serialBuf.startsWith("!!SCRIPTS!!")) {
                 String data = serialBuf.substring(11); // dupa "!!SCRIPTS!!"
+                Serial.println("[DBG] !!SCRIPTS!! primit, lungime bruta: " + String(data.length()));
                 if (data.length() > SCRIPTS_MAX_LEN) {
                     data = data.substring(0, SCRIPTS_MAX_LEN);
+                    Serial.println("[DBG] Trunchiat la " + String(SCRIPTS_MAX_LEN) + " chars");
                 }
                 if (pScriptsChar != nullptr) {
                     pScriptsChar->setValue(data.c_str());
+                    Serial.println("[SCRIPTS] Lista BLE actualizata: '" + data + "'");
+                } else {
+                    Serial.println("[DBG][ERR] pScriptsChar e nullptr la momentul setarii!");
                 }
-                Serial.println("[SCRIPTS] Lista actualizata: " + data);
             }
 
             serialBuf = "";

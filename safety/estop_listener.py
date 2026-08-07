@@ -272,6 +272,7 @@ def main():
 
     scripts     = load_scripts()
     scripts_msg = build_scripts_msg(scripts)
+    logging.info(f"[DBG] scripts_msg ce va fi trimis: {scripts_msg!r}")
 
     relay_queue = queue.Queue()
     socket_stop = threading.Event()
@@ -279,32 +280,39 @@ def main():
         target=_socket_relay_loop, args=(relay_queue, socket_stop),
         name="relay-socket", daemon=True)
     socket_thread.start()
+    logging.info(f"[DBG] relay-socket thread pornit, asculta pe {RELAY_SOCKET}")
 
     managed_proc = None  # procesul Python pornit de pe Garmin via !!RUN!!
 
     try:
         while True:
             ser = connect_serial()
+            logging.info(f"[DBG] Serial deschis: {ser.port} @ {ser.baudrate}")
 
             # Trimite lista de scripturi la ESP32 dupa fiecare conectare
             try:
                 ser.write(scripts_msg)
-            except (serial.SerialException, OSError):
-                pass
+                logging.info(f"[DBG] !!SCRIPTS!! trimis catre ESP32 ({len(scripts_msg)} bytes): {scripts_msg!r}")
+            except (serial.SerialException, OSError) as e:
+                logging.error(f"[DBG] Eroare la trimiterea !!SCRIPTS!!: {e}")
 
             stop_event = threading.Event()
             hb_thread = threading.Thread(
                 target=_heartbeat_loop, args=(ser, stop_event), name="heartbeat", daemon=True)
             hb_thread.start()
+            logging.info("[DBG] Heartbeat thread pornit")
+
             try:
                 while True:
                     # Trimite comenzi relay primite de la main.py / data_recorder.py
                     while not relay_queue.empty():
                         cmd = relay_queue.get_nowait()
+                        msg = b"!!ON!!\n" if cmd == "ON" else b"!!OFF!!\n"
                         try:
-                            ser.write(b"!!ON!!\n" if cmd == "ON" else b"!!OFF!!\n")
-                        except (serial.SerialException, OSError):
-                            pass
+                            ser.write(msg)
+                            logging.info(f"[DBG] Relay cmd trimis: {msg!r}")
+                        except (serial.SerialException, OSError) as e:
+                            logging.error(f"[DBG] Eroare relay cmd: {e}")
 
                     raw = ser.readline()
                     if not raw:
@@ -315,34 +323,47 @@ def main():
                     if not line:
                         continue
 
+                    # Log orice linie primita de la ESP32 (exceptie: HB echo care ar fi spam)
+                    if not line.startswith("[WD]") and "HB" not in line:
+                        logging.info(f"[DBG] ESP32→RPi: {line!r}")
+
                     if ESTOP_MARKER in line:
                         logging.warning(f"ESTOP PRIMIT: {line!r}")
                         managed_proc = None
                         kill_target_processes()
 
                     elif line.startswith("!!RUN!!"):
+                        logging.info(f"[DBG] Primit !!RUN!! linie: {line!r}")
                         try:
                             idx = int(line[len("!!RUN!!"):])
                         except ValueError:
+                            logging.error(f"[DBG] !!RUN!! index invalid (nu e int): {line!r}")
                             continue
+                        logging.info(f"[DBG] !!RUN!! index={idx}, scripturi disponibile={len(scripts)}")
                         if 0 <= idx < len(scripts):
                             path = scripts[idx]["path"]
+                            logging.info(f"[DBG] Pornesc: python3 {path}")
                             # Opreste procesul curent daca ruleaza
                             if managed_proc is not None and managed_proc.poll() is None:
+                                logging.info(f"[DBG] Opresc procesul curent PID {managed_proc.pid}")
                                 managed_proc.terminate()
                             managed_proc = subprocess.Popen(["python3", path])
-                            logging.info(f"Pornit {path} (PID {managed_proc.pid})")
+                            logging.info(f"[DBG] Pornit {path} (PID {managed_proc.pid})")
                         else:
-                            logging.warning(f"!!RUN!! index invalid: {idx}")
+                            logging.warning(f"[DBG] !!RUN!! index {idx} out of range (0..{len(scripts)-1})")
 
                     elif line == "!!STOP!!":
+                        logging.info(f"[DBG] Primit !!STOP!!")
                         if managed_proc is not None and managed_proc.poll() is None:
-                            logging.info(f"Oprire script (PID {managed_proc.pid})")
+                            logging.info(f"[DBG] Oprire script PID {managed_proc.pid}")
                             managed_proc.terminate()
+                        else:
+                            logging.info("[DBG] !!STOP!! primit dar niciun script nu rula")
                         managed_proc = None
 
             except (serial.SerialException, OSError) as e:
                 logging.warning(f"Port serial deconectat ({e}) - reconectare in {RECONNECT_SLEEP_SECONDS}s.")
+                logging.info(f"[DBG] Serial exception detalii: {type(e).__name__}: {e}")
             finally:
                 stop_event.set()
                 hb_thread.join(timeout=2)

@@ -44,7 +44,9 @@ so it starts at boot and restarts automatically if it ever crashes.
 
 import logging
 import os
+import queue
 import signal
+import socket
 import sys
 import threading
 import time
@@ -55,6 +57,7 @@ import serial
 PROJECT_DIR = "/home/pi/RoboPacerV2"
 ESTOP_MARKER = "!!ESTOP!!"
 HEARTBEAT_MESSAGE = b"!!HB!!\n"
+RELAY_SOCKET = "/tmp/esp32_relay.sock"  # Unix socket pentru comenzi relay de la main.py / data_recorder.py
 HEARTBEAT_INTERVAL_SECONDS = 0.5  # ESP32-side watchdog trips at 2000ms with
                                   # no heartbeat - well above this interval,
                                   # so one or two missed beats from normal
@@ -109,6 +112,45 @@ def connect_serial():
         except serial.SerialException as e:
             logging.warning(f"Nu pot deschide {port}: {e} - reincerc in {RECONNECT_SLEEP_SECONDS}s.")
             time.sleep(RECONNECT_SLEEP_SECONDS)
+
+
+def _socket_relay_loop(relay_queue, stop_event):
+    """Listens on RELAY_SOCKET for RELAY_ON / RELAY_OFF commands from
+    main.py / data_recorder.py. Puts ("ON",) or ("OFF",) into relay_queue;
+    the main serial-read loop drains it and writes !!ON!! / !!OFF!! to the
+    ESP32. Runs as a global daemon thread for the entire process lifetime —
+    not per serial connection, since the socket binding is independent of
+    whether the ESP32 is currently plugged in."""
+    try:
+        os.unlink(RELAY_SOCKET)
+    except OSError:
+        pass
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(RELAY_SOCKET)
+    srv.listen(5)
+    srv.settimeout(1.0)
+    try:
+        while not stop_event.is_set():
+            try:
+                conn, _ = srv.accept()
+            except socket.timeout:
+                continue
+            with conn:
+                try:
+                    data = conn.recv(64).decode("utf-8", errors="replace").strip()
+                except OSError:
+                    continue
+                if data == "RELAY_ON":
+                    relay_queue.put("ON")
+                elif data == "RELAY_OFF":
+                    relay_queue.put("OFF")
+    finally:
+        srv.close()
+        try:
+            os.unlink(RELAY_SOCKET)
+        except OSError:
+            pass
 
 
 def _heartbeat_loop(ser, stop_event):
@@ -206,6 +248,13 @@ def main():
     signal.signal(signal.SIGTERM, _handle_sigterm)
     logging.info(f"estop_listener pornit (PID {os.getpid()}) - astept {ESTOP_MARKER!r} pe serial pentru {PROJECT_DIR}")
 
+    relay_queue = queue.Queue()
+    socket_stop = threading.Event()
+    socket_thread = threading.Thread(
+        target=_socket_relay_loop, args=(relay_queue, socket_stop),
+        name="relay-socket", daemon=True)
+    socket_thread.start()
+
     try:
         while True:
             ser = connect_serial()
@@ -215,6 +264,14 @@ def main():
             hb_thread.start()
             try:
                 while True:
+                    # Trimite comenzi relay primite de la main.py / data_recorder.py
+                    while not relay_queue.empty():
+                        cmd = relay_queue.get_nowait()
+                        try:
+                            ser.write(b"!!ON!!\n" if cmd == "ON" else b"!!OFF!!\n")
+                        except (serial.SerialException, OSError):
+                            pass
+
                     raw = ser.readline()
                     if not raw:
                         if stop_event.is_set():
@@ -241,6 +298,7 @@ def main():
                     pass
                 time.sleep(RECONNECT_SLEEP_SECONDS)
     except KeyboardInterrupt:
+        socket_stop.set()
         logging.info("estop_listener oprit.")
 
 

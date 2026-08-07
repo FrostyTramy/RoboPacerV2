@@ -11,8 +11,9 @@
 #include "secrets.h"  // APP_SECRET, APP_SECRET_LEN — nu e pe GitHub
 // ─────────────────────────────────────────────────────────────
 
-#define SERVICE_UUID "a0b0c0d0-e0f0-1234-5678-9abcdef01234"
-#define CHAR_UUID    "a0b0c0d0-e0f0-1234-5678-9abcdef05678"
+#define SERVICE_UUID      "a0b0c0d0-e0f0-1234-5678-9abcdef01234"
+#define CHAR_UUID         "a0b0c0d0-e0f0-1234-5678-9abcdef05678"  // WRITE (comenzi Garmin)
+#define STATUS_CHAR_UUID  "a0b0c0d0-e0f0-1234-5678-9abcdef09abc"  // READ  (stare releu → Garmin)
 
 #define CMD_AUTH  0xAA
 #define BTN_UP    0x01
@@ -20,8 +21,10 @@
 #define BTN_LAP   0x03
 #define BTN_ENTER 0x04
 
-BLECharacteristic* pWriteChar = nullptr;
+BLECharacteristic* pWriteChar  = nullptr;
+BLECharacteristic* pStatusChar = nullptr;
 bool authenticated = false;
+bool relayOn       = false;
 
 // Watchdog
 unsigned long lastHeartbeatMs = 0;
@@ -29,6 +32,16 @@ bool watchdogArmed = false;
 String serialBuf = "";
 
 void onButtonPress(uint8_t btn);
+
+// Seteaza starea releului si actualizeaza caracteristica de status BLE
+void updateRelayState(bool on) {
+    relayOn = on;
+    digitalWrite(RELAY_PIN, on ? HIGH : LOW);
+    if (pStatusChar != nullptr) {
+        uint8_t val = on ? 0x01 : 0x00;
+        pStatusChar->setValue(&val, 1);
+    }
+}
 
 class ServerCallbacks : public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) override {
@@ -80,10 +93,10 @@ class CharCallbacks : public BLECharacteristicCallbacks {
 
 void onButtonPress(uint8_t btn) {
     if (btn == BTN_UP) {
-        digitalWrite(RELAY_PIN, HIGH);
+        updateRelayState(true);
         Serial.println("[RELAY] ON");
     } else if (btn == BTN_DOWN) {
-        digitalWrite(RELAY_PIN, LOW);
+        updateRelayState(false);
         Serial.println("[RELAY] OFF");
         Serial.println("!!ESTOP!!");
     }
@@ -92,7 +105,7 @@ void onButtonPress(uint8_t btn) {
 void setup() {
     Serial.begin(115200);
     pinMode(RELAY_PIN, OUTPUT);
-    digitalWrite(RELAY_PIN, LOW);
+    updateRelayState(false);
 
     String advName = String("GarminPacer|") + DEVICE_NAME;
     BLEDevice::init(advName.c_str());
@@ -100,12 +113,21 @@ void setup() {
     BLEServer* pServer = BLEDevice::createServer();
     pServer->setCallbacks(new ServerCallbacks());
 
-    BLEService* pService = pServer->createService(SERVICE_UUID);
+    BLEService* pService = pServer->createService(BLEUUID(SERVICE_UUID), 10);
+
     pWriteChar = pService->createCharacteristic(
         CHAR_UUID,
         BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR
     );
     pWriteChar->setCallbacks(new CharCallbacks());
+
+    pStatusChar = pService->createCharacteristic(
+        STATUS_CHAR_UUID,
+        BLECharacteristic::PROPERTY_READ
+    );
+    uint8_t initVal = 0x00;
+    pStatusChar->setValue(&initVal, 1);
+
     pService->start();
 
     BLEAdvertising* pAdv = BLEDevice::getAdvertising();
@@ -118,7 +140,7 @@ void setup() {
 }
 
 void loop() {
-    // Citeste heartbeat de pe serial (non-blocking, char cu char)
+    // Citeste comenzi de pe serial (non-blocking, char cu char)
     while (Serial.available()) {
         char c = (char)Serial.read();
         if (c == '\n') {
@@ -129,6 +151,12 @@ void loop() {
                     watchdogArmed = true;
                     Serial.println("[WD] Armat");
                 }
+            } else if (serialBuf.equals("!!ON!!")) {
+                updateRelayState(true);
+                Serial.println("[RELAY] ON via serial");
+            } else if (serialBuf.equals("!!OFF!!")) {
+                updateRelayState(false);
+                Serial.println("[RELAY] OFF via serial");
             }
             serialBuf = "";
         } else {
@@ -139,7 +167,7 @@ void loop() {
     // Watchdog: daca heartbeat-ul s-a oprit, opreste releul
     if (watchdogArmed && (millis() - lastHeartbeatMs > WATCHDOG_TIMEOUT_MS)) {
         watchdogArmed = false;
-        digitalWrite(RELAY_PIN, LOW);
+        updateRelayState(false);
         Serial.println("[WD] Relay OFF — heartbeat pierdut");
     }
 

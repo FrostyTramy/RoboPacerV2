@@ -77,6 +77,7 @@ import logging
 import os
 import select
 import signal
+import socket
 import time
 from collections import deque
 
@@ -375,6 +376,20 @@ def _handle_sigterm(signum, frame):
     raise KeyboardInterrupt
 
 
+_RELAY_SOCKET = "/tmp/esp32_relay.sock"
+
+def _relay_cmd(cmd: str) -> None:
+    """Trimite RELAY_ON / RELAY_OFF la estop_listener care detine portul serial.
+    Best-effort: daca ESP32-ul nu e conectat sau serviciul nu ruleaza, ignora silentios."""
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(1.0)
+            s.connect(_RELAY_SOCKET)
+            s.sendall((cmd + "\n").encode())
+    except (OSError, socket.timeout):
+        pass
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--display", action="store_true",
@@ -396,6 +411,7 @@ def main():
     controller = None
 
     try:
+        _relay_cmd("RELAY_ON")
         hef_path = find_hef_path()
         print(f"[Hailo] Model: {os.path.basename(hef_path)}")
         hef = HEF(hef_path)
@@ -553,6 +569,7 @@ def main():
         logging.exception("Eroare majora neasteptata")
         print(f"\nEroare majora neasteptata: {e}")
     finally:
+        _relay_cmd("RELAY_OFF")
         if esc is not None:
             esc.neutral()
             time.sleep(0.1)

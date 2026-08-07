@@ -72,6 +72,7 @@ import os
 import queue
 import select
 import signal
+import socket
 import threading
 import time
 
@@ -363,6 +364,18 @@ def _handle_sigterm(signum, frame):
     raise KeyboardInterrupt
 
 
+_RELAY_SOCKET = "/tmp/esp32_relay.sock"
+
+def _relay_cmd(cmd: str) -> None:
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(1.0)
+            s.connect(_RELAY_SOCKET)
+            s.sendall((cmd + "\n").encode())
+    except (OSError, socket.timeout):
+        pass
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--legacy", action="store_true",
@@ -447,6 +460,7 @@ def main():
     writer_thread.start()
 
     try:
+        _relay_cmd("RELAY_ON")
         # --- I2C / PCA9685 --------------------------------------------------
         i2c = busio.I2C(board.SCL, board.SDA)
         pca = PCA9685(i2c)
@@ -598,6 +612,7 @@ def main():
         logging.exception("Eroare majora neasteptata")
         print(f"\nEroare majora neasteptata: {e}")
     finally:
+        _relay_cmd("RELAY_OFF")
         # Motor to neutral first, before anything that can take a while
         # (like draining a backlog of queued disk writes) - stopping the
         # car is more urgent than finishing the save.

@@ -140,6 +140,10 @@ void loop() {
                     watchdogArmed = true;
                     Serial.println("[WD] Armat");
                 }
+            } else if (serialBuf.equals("!!ON!!")) {
+                setRelay(true);
+            } else if (serialBuf.equals("!!OFF!!")) {
+                setRelay(false);
             }
             serialBuf = "";
         } else {

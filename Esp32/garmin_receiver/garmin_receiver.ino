@@ -7,22 +7,27 @@
 #define DEVICE_NAME          "Pacer1"   // numele afisat pe ceas
 #define RELAY_PIN            2          // LED built-in ESP32 (inlocuieste releul la test; schimba la 26 cand ai releu)
 #define WATCHDOG_TIMEOUT_MS  2000       // ms fara heartbeat → relay off
+#define SCRIPTS_MAX_LEN      200        // caractere maxime pentru lista de scripturi
 
 #include "secrets.h"  // APP_SECRET, APP_SECRET_LEN — nu e pe GitHub, vezi secrets.h.example
 // ─────────────────────────────────────────────────────────────
 
-#define SERVICE_UUID      "a0b0c0d0-e0f0-1234-5678-9abcdef01234"
-#define CHAR_UUID         "a0b0c0d0-e0f0-1234-5678-9abcdef05678"  // WRITE (comenzi Garmin)
-#define STATUS_CHAR_UUID  "a0b0c0d0-e0f0-1234-5678-9abcdef09abc"  // READ  (stare releu → Garmin)
+#define SERVICE_UUID       "a0b0c0d0-e0f0-1234-5678-9abcdef01234"
+#define CHAR_UUID          "a0b0c0d0-e0f0-1234-5678-9abcdef05678"  // WRITE  (comenzi Garmin)
+#define STATUS_CHAR_UUID   "a0b0c0d0-e0f0-1234-5678-9abcdef09abc"  // READ   (stare releu → Garmin)
+#define SCRIPTS_CHAR_UUID  "a0b0c0d0-e0f0-1234-5678-9abcdef0ef01"  // READ   (lista scripturi → Garmin)
 
 #define CMD_AUTH  0xAA
 #define BTN_UP    0x01
 #define BTN_DOWN  0x02
 #define BTN_LAP   0x03
 #define BTN_ENTER 0x04
+#define CMD_RUN   0x10  // + 1 byte index script
+#define CMD_STOP  0x11
 
-BLECharacteristic* pWriteChar  = nullptr;
-BLECharacteristic* pStatusChar = nullptr;
+BLECharacteristic* pWriteChar   = nullptr;
+BLECharacteristic* pStatusChar  = nullptr;
+BLECharacteristic* pScriptsChar = nullptr;
 bool authenticated = false;
 bool relayOn       = false;
 
@@ -32,6 +37,7 @@ bool watchdogArmed = false;
 String serialBuf = "";
 
 void onButtonPress(uint8_t btn);
+void onRunScript(uint8_t idx);
 
 // Seteaza starea releului si actualizeaza caracteristica de status BLE
 void updateRelayState(bool on) {
@@ -81,13 +87,25 @@ class CharCallbacks : public BLECharacteristicCallbacks {
         }
 
         switch (cmd) {
-            case BTN_UP:    Serial.println("BUTON: UP");    break;
-            case BTN_DOWN:  Serial.println("BUTON: DOWN");  break;
-            case BTN_LAP:   Serial.println("BUTON: LAP");   break;
-            case BTN_ENTER: Serial.println("BUTON: ENTER"); break;
-            default:        Serial.printf("CMD: 0x%02X\n", cmd); break;
+            case BTN_UP:    Serial.println("BUTON: UP");    onButtonPress(BTN_UP);    break;
+            case BTN_DOWN:  Serial.println("BUTON: DOWN");  onButtonPress(BTN_DOWN);  break;
+            case BTN_LAP:   Serial.println("BUTON: LAP");                             break;
+            case BTN_ENTER: Serial.println("BUTON: ENTER");                           break;
+            case CMD_STOP:
+                Serial.println("[SCRIPTS] STOP");
+                Serial.println("!!STOP!!");
+                break;
+            case CMD_RUN:
+                if (val.length() >= 2) {
+                    uint8_t idx = (uint8_t)val[1];
+                    Serial.printf("[SCRIPTS] RUN %d\n", idx);
+                    onRunScript(idx);
+                }
+                break;
+            default:
+                Serial.printf("CMD: 0x%02X\n", cmd);
+                break;
         }
-        onButtonPress(cmd);
     }
 };
 
@@ -102,6 +120,11 @@ void onButtonPress(uint8_t btn) {
     }
 }
 
+void onRunScript(uint8_t idx) {
+    Serial.print("!!RUN!!");
+    Serial.println(idx);
+}
+
 void setup() {
     Serial.begin(115200);
     pinMode(RELAY_PIN, OUTPUT);
@@ -113,7 +136,7 @@ void setup() {
     BLEServer* pServer = BLEDevice::createServer();
     pServer->setCallbacks(new ServerCallbacks());
 
-    BLEService* pService = pServer->createService(BLEUUID(SERVICE_UUID), 10);
+    BLEService* pService = pServer->createService(BLEUUID(SERVICE_UUID), 16);
 
     pWriteChar = pService->createCharacteristic(
         CHAR_UUID,
@@ -127,6 +150,12 @@ void setup() {
     );
     uint8_t initVal = 0x00;
     pStatusChar->setValue(&initVal, 1);
+
+    pScriptsChar = pService->createCharacteristic(
+        SCRIPTS_CHAR_UUID,
+        BLECharacteristic::PROPERTY_READ
+    );
+    pScriptsChar->setValue("");
 
     pService->start();
 
@@ -145,6 +174,7 @@ void loop() {
         char c = (char)Serial.read();
         if (c == '\n') {
             serialBuf.trim();
+
             if (serialBuf.equals("!!HB!!")) {
                 lastHeartbeatMs = millis();
                 if (!watchdogArmed) {
@@ -157,7 +187,17 @@ void loop() {
             } else if (serialBuf.equals("!!OFF!!")) {
                 updateRelayState(false);
                 Serial.println("[RELAY] OFF via serial");
+            } else if (serialBuf.startsWith("!!SCRIPTS!!")) {
+                String data = serialBuf.substring(11); // dupa "!!SCRIPTS!!"
+                if (data.length() > SCRIPTS_MAX_LEN) {
+                    data = data.substring(0, SCRIPTS_MAX_LEN);
+                }
+                if (pScriptsChar != nullptr) {
+                    pScriptsChar->setValue(data.c_str());
+                }
+                Serial.println("[SCRIPTS] Lista actualizata: " + data);
             }
+
             serialBuf = "";
         } else {
             serialBuf += c;

@@ -42,11 +42,13 @@ Runs as a systemd service (see estop-listener.service in this same folder)
 so it starts at boot and restarts automatically if it ever crashes.
 """
 
+import json
 import logging
 import os
 import queue
 import signal
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -58,6 +60,7 @@ PROJECT_DIR = "/home/pi/RoboPacerV2"
 ESTOP_MARKER = "!!ESTOP!!"
 HEARTBEAT_MESSAGE = b"!!HB!!\n"
 RELAY_SOCKET = "/tmp/esp32_relay.sock"  # Unix socket pentru comenzi relay de la main.py / data_recorder.py
+SCRIPTS_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scripts.json")
 HEARTBEAT_INTERVAL_SECONDS = 0.5  # ESP32-side watchdog trips at 2000ms with
                                   # no heartbeat - well above this interval,
                                   # so one or two missed beats from normal
@@ -112,6 +115,25 @@ def connect_serial():
         except serial.SerialException as e:
             logging.warning(f"Nu pot deschide {port}: {e} - reincerc in {RECONNECT_SLEEP_SECONDS}s.")
             time.sleep(RECONNECT_SLEEP_SECONDS)
+
+
+def load_scripts():
+    """Incarca scripts.json — lista de scripturi Python care pot fi pornite de pe Garmin.
+    Returneaza lista de dictionare {"name": ..., "path": ...} sau [] la eroare."""
+    try:
+        with open(SCRIPTS_JSON) as f:
+            data = json.load(f)
+        logging.info(f"Scripturi incarcate: {[s['name'] for s in data]}")
+        return data
+    except (OSError, json.JSONDecodeError, KeyError) as e:
+        logging.warning(f"Nu pot incarca {SCRIPTS_JSON}: {e} - lista vida.")
+        return []
+
+
+def build_scripts_msg(scripts):
+    """Construieste mesajul !!SCRIPTS!!name1:path1|name2:path2 pentru ESP32."""
+    parts = [f"{s['name']}:{s['path']}" for s in scripts]
+    return ("!!SCRIPTS!!" + "|".join(parts) + "\n").encode()
 
 
 def _socket_relay_loop(relay_queue, stop_event):
@@ -248,6 +270,9 @@ def main():
     signal.signal(signal.SIGTERM, _handle_sigterm)
     logging.info(f"estop_listener pornit (PID {os.getpid()}) - astept {ESTOP_MARKER!r} pe serial pentru {PROJECT_DIR}")
 
+    scripts     = load_scripts()
+    scripts_msg = build_scripts_msg(scripts)
+
     relay_queue = queue.Queue()
     socket_stop = threading.Event()
     socket_thread = threading.Thread(
@@ -255,9 +280,18 @@ def main():
         name="relay-socket", daemon=True)
     socket_thread.start()
 
+    managed_proc = None  # procesul Python pornit de pe Garmin via !!RUN!!
+
     try:
         while True:
             ser = connect_serial()
+
+            # Trimite lista de scripturi la ESP32 dupa fiecare conectare
+            try:
+                ser.write(scripts_msg)
+            except (serial.SerialException, OSError):
+                pass
+
             stop_event = threading.Event()
             hb_thread = threading.Thread(
                 target=_heartbeat_loop, args=(ser, stop_event), name="heartbeat", daemon=True)
@@ -275,18 +309,38 @@ def main():
                     raw = ser.readline()
                     if not raw:
                         if stop_event.is_set():
-                            # Heartbeat thread hit a write error and already
-                            # bailed out - don't wait for a read to also fail
-                            # (it might not, e.g. a TX-only USB fault) before
-                            # reconnecting.
                             raise serial.SerialException("Heartbeat thread reported a write failure")
-                        continue  # read timeout with no data - normal, keep polling
+                        continue
                     line = raw.decode("utf-8", errors="replace").strip()
                     if not line:
                         continue
+
                     if ESTOP_MARKER in line:
                         logging.warning(f"ESTOP PRIMIT: {line!r}")
+                        managed_proc = None
                         kill_target_processes()
+
+                    elif line.startswith("!!RUN!!"):
+                        try:
+                            idx = int(line[len("!!RUN!!"):])
+                        except ValueError:
+                            continue
+                        if 0 <= idx < len(scripts):
+                            path = scripts[idx]["path"]
+                            # Opreste procesul curent daca ruleaza
+                            if managed_proc is not None and managed_proc.poll() is None:
+                                managed_proc.terminate()
+                            managed_proc = subprocess.Popen(["python3", path])
+                            logging.info(f"Pornit {path} (PID {managed_proc.pid})")
+                        else:
+                            logging.warning(f"!!RUN!! index invalid: {idx}")
+
+                    elif line == "!!STOP!!":
+                        if managed_proc is not None and managed_proc.poll() is None:
+                            logging.info(f"Oprire script (PID {managed_proc.pid})")
+                            managed_proc.terminate()
+                        managed_proc = None
+
             except (serial.SerialException, OSError) as e:
                 logging.warning(f"Port serial deconectat ({e}) - reconectare in {RECONNECT_SLEEP_SECONDS}s.")
             finally:
@@ -299,6 +353,8 @@ def main():
                 time.sleep(RECONNECT_SLEEP_SECONDS)
     except KeyboardInterrupt:
         socket_stop.set()
+        if managed_proc is not None and managed_proc.poll() is None:
+            managed_proc.terminate()
         logging.info("estop_listener oprit.")
 
 

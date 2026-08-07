@@ -1,72 +1,61 @@
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLEUtils.h>
-#include <BLE2902.h>
 
-// ── Configuratie ──────────────────────────────────────────────
-#define DEVICE_NAME          "Pacer1"   // numele afisat pe ceas
-#define RELAY_PIN            2          // LED built-in ESP32 (inlocuieste releul la test; schimba la 26 cand ai releu)
-#define WATCHDOG_TIMEOUT_MS  2000       // ms fara heartbeat → relay off
-#define SCRIPTS_MAX_LEN      200        // caractere maxime pentru lista de scripturi
+#define DEVICE_NAME         "Pacer1"
+#define RELAY_PIN           26
+#define LED_PIN             2
+#define WATCHDOG_TIMEOUT_MS 2000
 
-#include "secrets.h"  // APP_SECRET, APP_SECRET_LEN — nu e pe GitHub, vezi secrets.h.example
-// ─────────────────────────────────────────────────────────────
+#include "secrets.h"  // APP_SECRET[], APP_SECRET_LEN
 
-#define SERVICE_UUID       "a0b0c0d0-e0f0-1234-5678-9abcdef01234"
-#define CHAR_UUID          "a0b0c0d0-e0f0-1234-5678-9abcdef05678"  // WRITE  (comenzi Garmin)
-#define STATUS_CHAR_UUID   "a0b0c0d0-e0f0-1234-5678-9abcdef09abc"  // READ   (stare releu → Garmin)
-#define SCRIPTS_CHAR_UUID  "a0b0c0d0-e0f0-1234-5678-9abcdef0ef01"  // READ   (lista scripturi → Garmin)
+#define SERVICE_UUID     "a0b0c0d0-e0f0-1234-5678-9abcdef01234"
+#define WRITE_CHAR_UUID  "a0b0c0d0-e0f0-1234-5678-9abcdef05678"
+#define STATUS_CHAR_UUID "a0b0c0d0-e0f0-1234-5678-9abcdef09abc"
 
-#define CMD_AUTH  0xAA
-#define BTN_UP    0x01
-#define BTN_DOWN  0x02
-#define BTN_LAP   0x03
-#define BTN_ENTER 0x04
-#define CMD_RUN   0x10  // + 1 byte index script
-#define CMD_STOP  0x11
+#define CMD_AUTH 0xAA
+#define CMD_ON   0x01
+#define CMD_OFF  0x02
 
-BLECharacteristic* pWriteChar   = nullptr;
-BLECharacteristic* pStatusChar  = nullptr;
-BLECharacteristic* pScriptsChar = nullptr;
-bool authenticated    = false;
-bool relayOn          = false;
-bool scriptLaunched   = false;
+BLECharacteristic* pWriteChar  = nullptr;
+BLECharacteristic* pStatusChar = nullptr;
 
-// Watchdog
+bool authenticated = false;
+bool relayOn       = false;
+
 unsigned long lastHeartbeatMs = 0;
 bool watchdogArmed = false;
 String serialBuf = "";
 
-void onButtonPress(uint8_t btn);
-void onRunScript(uint8_t idx);
-
-// Seteaza starea releului si actualizeaza caracteristica de status BLE
-void updateRelayState(bool on) {
+// Seteaza ambele iesiri + actualizeaza STATUS_CHAR + trimite ESTOP pe serial la OFF
+void setRelay(bool on) {
+    if (on == relayOn) {
+        Serial.printf("[RELAY] Ignorat — deja %s\n", on ? "ON" : "OFF");
+        return;
+    }
     relayOn = on;
     digitalWrite(RELAY_PIN, on ? HIGH : LOW);
+    digitalWrite(LED_PIN,   on ? HIGH : LOW);
     if (pStatusChar != nullptr) {
         uint8_t val = on ? 0x01 : 0x00;
         pStatusChar->setValue(&val, 1);
     }
+    Serial.printf("[RELAY] %s\n", on ? "ON" : "OFF");
+    if (!on) {
+        Serial.println("!!ESTOP!!");
+    }
 }
 
 class ServerCallbacks : public BLEServerCallbacks {
-    void onConnect(BLEServer* pServer) override {
+    void onConnect(BLEServer*) override {
         authenticated = false;
-        Serial.println("[BLE] Conectat, astept autentificare...");
+        Serial.println("[BLE] Conectat");
     }
     void onDisconnect(BLEServer* pServer) override {
-        authenticated    = false;
-        scriptLaunched   = false;
-        Serial.println("[BLE] Deconectat, reincep advertising...");
+        authenticated = false;
+        setRelay(false);
+        Serial.println("[BLE] Deconectat, restart advertising");
         pServer->getAdvertising()->start();
-    }
-};
-
-class ScriptsReadCallbacks : public BLECharacteristicCallbacks {
-    void onRead(BLECharacteristic* pChar) override {
-        String val = pChar->getValue().c_str();
-        Serial.println("[DBG] SCRIPTS_CHAR citit de Garmin, valoare: '" + val + "' (" + val.length() + " bytes)");
     }
 };
 
@@ -86,7 +75,7 @@ class CharCallbacks : public BLECharacteristicCallbacks {
                 if ((uint8_t)val[i + 1] != APP_SECRET[i]) { ok = false; break; }
             }
             authenticated = ok;
-            Serial.println(ok ? "[AUTH] Autentificat OK" : "[AUTH] Cod gresit!");
+            Serial.println(ok ? "[AUTH] OK" : "[AUTH] Gresit!");
             return;
         }
 
@@ -95,55 +84,18 @@ class CharCallbacks : public BLECharacteristicCallbacks {
             return;
         }
 
-        switch (cmd) {
-            case BTN_UP:    Serial.println("BUTON: UP");    onButtonPress(BTN_UP);    break;
-            case BTN_DOWN:  Serial.println("BUTON: DOWN");  onButtonPress(BTN_DOWN);  break;
-            case BTN_LAP:   Serial.println("BUTON: LAP");                             break;
-            case BTN_ENTER: Serial.println("BUTON: ENTER");                           break;
-            case CMD_STOP:
-                if (!scriptLaunched) { Serial.println("[SCRIPTS] STOP ignorat (niciun script activ)"); break; }
-                scriptLaunched = false;
-                Serial.println("[SCRIPTS] STOP");
-                Serial.println("!!STOP!!");
-                break;
-            case CMD_RUN:
-                if (scriptLaunched) { Serial.println("[SCRIPTS] RUN ignorat (deja lansat)"); break; }
-                if (val.length() >= 2) {
-                    uint8_t idx = (uint8_t)val[1];
-                    scriptLaunched = true;
-                    Serial.printf("[SCRIPTS] RUN %d\n", idx);
-                    onRunScript(idx);
-                }
-                break;
-            default:
-                Serial.printf("CMD: 0x%02X\n", cmd);
-                break;
-        }
+        if      (cmd == CMD_ON)  { setRelay(true);  }
+        else if (cmd == CMD_OFF) { setRelay(false); }
+        else { Serial.printf("[BLE] CMD necunoscut: 0x%02X\n", cmd); }
     }
 };
-
-void onButtonPress(uint8_t btn) {
-    if (btn == BTN_UP) {
-        if (relayOn) { Serial.println("[RELAY] UP ignorat (deja ON)"); return; }
-        updateRelayState(true);
-        Serial.println("[RELAY] ON");
-    } else if (btn == BTN_DOWN) {
-        if (!relayOn) { Serial.println("[RELAY] DOWN ignorat (deja OFF)"); return; }
-        updateRelayState(false);
-        Serial.println("[RELAY] OFF");
-        Serial.println("!!ESTOP!!");
-    }
-}
-
-void onRunScript(uint8_t idx) {
-    Serial.print("!!RUN!!");
-    Serial.println(idx);
-}
 
 void setup() {
     Serial.begin(115200);
     pinMode(RELAY_PIN, OUTPUT);
-    updateRelayState(false);
+    pinMode(LED_PIN,   OUTPUT);
+    digitalWrite(RELAY_PIN, LOW);
+    digitalWrite(LED_PIN,   LOW);
 
     String advName = String("GarminPacer|") + DEVICE_NAME;
     BLEDevice::init(advName.c_str());
@@ -151,10 +103,10 @@ void setup() {
     BLEServer* pServer = BLEDevice::createServer();
     pServer->setCallbacks(new ServerCallbacks());
 
-    BLEService* pService = pServer->createService(BLEUUID(SERVICE_UUID), 16);
+    BLEService* pService = pServer->createService(BLEUUID(SERVICE_UUID), 8);
 
     pWriteChar = pService->createCharacteristic(
-        CHAR_UUID,
+        WRITE_CHAR_UUID,
         BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR
     );
     pWriteChar->setCallbacks(new CharCallbacks());
@@ -165,14 +117,6 @@ void setup() {
     );
     uint8_t initVal = 0x00;
     pStatusChar->setValue(&initVal, 1);
-
-    pScriptsChar = pService->createCharacteristic(
-        SCRIPTS_CHAR_UUID,
-        BLECharacteristic::PROPERTY_READ
-    );
-    pScriptsChar->setCallbacks(new ScriptsReadCallbacks());
-    pScriptsChar->setValue("");
-    Serial.println("[DBG] SCRIPTS_CHAR creat (gol, asteapta !!SCRIPTS!! de la RPi)");
 
     pService->start();
 
@@ -186,51 +130,27 @@ void setup() {
 }
 
 void loop() {
-    // Citeste comenzi de pe serial (non-blocking, char cu char)
     while (Serial.available()) {
         char c = (char)Serial.read();
         if (c == '\n') {
             serialBuf.trim();
-
             if (serialBuf.equals("!!HB!!")) {
                 lastHeartbeatMs = millis();
                 if (!watchdogArmed) {
                     watchdogArmed = true;
                     Serial.println("[WD] Armat");
                 }
-            } else if (serialBuf.equals("!!ON!!")) {
-                updateRelayState(true);
-                Serial.println("[RELAY] ON via serial");
-            } else if (serialBuf.equals("!!OFF!!")) {
-                updateRelayState(false);
-                scriptLaunched = false;
-                Serial.println("[RELAY] OFF via serial");
-            } else if (serialBuf.startsWith("!!SCRIPTS!!")) {
-                String data = serialBuf.substring(11); // dupa "!!SCRIPTS!!"
-                Serial.println("[DBG] !!SCRIPTS!! primit, lungime bruta: " + String(data.length()));
-                if (data.length() > SCRIPTS_MAX_LEN) {
-                    data = data.substring(0, SCRIPTS_MAX_LEN);
-                    Serial.println("[DBG] Trunchiat la " + String(SCRIPTS_MAX_LEN) + " chars");
-                }
-                if (pScriptsChar != nullptr) {
-                    pScriptsChar->setValue(data.c_str());
-                    Serial.println("[SCRIPTS] Lista BLE actualizata: '" + data + "'");
-                } else {
-                    Serial.println("[DBG][ERR] pScriptsChar e nullptr la momentul setarii!");
-                }
             }
-
             serialBuf = "";
         } else {
             serialBuf += c;
         }
     }
 
-    // Watchdog: daca heartbeat-ul s-a oprit, opreste releul
     if (watchdogArmed && (millis() - lastHeartbeatMs > WATCHDOG_TIMEOUT_MS)) {
         watchdogArmed = false;
-        updateRelayState(false);
-        Serial.println("[WD] Relay OFF — heartbeat pierdut");
+        Serial.println("[WD] Heartbeat pierdut");
+        setRelay(false);
     }
 
     delay(10);

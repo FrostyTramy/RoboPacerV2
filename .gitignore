@@ -24,6 +24,9 @@ Pista-biciclete/
 # Garmin ConnectIQ app (build artifacts + source — nu merge pe github)
 Esp32/ConnectIQ/
 
+# Secrete — nu merge pe github
+Esp32/garmin_receiver/secrets.h
+
 # Logs
 *.log
 

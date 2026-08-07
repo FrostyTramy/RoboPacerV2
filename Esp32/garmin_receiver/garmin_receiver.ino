@@ -8,9 +8,7 @@
 #define RELAY_PIN            2          // LED built-in ESP32 (inlocuieste releul la test; schimba la 26 cand ai releu)
 #define WATCHDOG_TIMEOUT_MS  2000       // ms fara heartbeat → relay off
 
-// Codul secret — trebuie sa fie identic cu APP_SECRET din App.mc
-const uint8_t APP_SECRET[] = { 0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6 };
-const uint8_t APP_SECRET_LEN = 6;
+#include "secrets.h"  // APP_SECRET, APP_SECRET_LEN — nu e pe GitHub
 // ─────────────────────────────────────────────────────────────
 
 #define SERVICE_UUID "a0b0c0d0-e0f0-1234-5678-9abcdef01234"

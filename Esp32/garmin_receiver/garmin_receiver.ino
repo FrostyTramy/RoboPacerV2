@@ -53,7 +53,6 @@ class ServerCallbacks : public BLEServerCallbacks {
     }
     void onDisconnect(BLEServer* pServer) override {
         authenticated = false;
-        setRelay(false);
         Serial.println("[BLE] Deconectat, restart advertising");
         pServer->getAdvertising()->start();
     }

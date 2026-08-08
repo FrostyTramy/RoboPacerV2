@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="ro">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>RoboPacer</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <h1>RoboPacer</h1>
+
+    <div id="running-banner" class="banner" style="display:none">
+        <span>Ruleaza acum: <strong id="running-name"></strong></span>
+        <button class="btn-stop btn-small" onclick="stopCurrent()">Stop</button>
+    </div>
+
+    <div class="grid">
+        <div class="card"><div class="label">CPU</div><div class="value" id="stat-cpu">--</div></div>
+        <div class="card"><div class="label">Hailo</div><div class="value" id="stat-hailo">--</div></div>
+        <div class="card"><div class="label">Releu</div><div class="value" id="stat-relay"><span class="dot"></span>--</div></div>
+        <div class="card"><div class="label">ESP32</div><div class="value" id="stat-esp32"><span class="dot"></span>--</div></div>
+        <div class="card"><div class="label">Watchdog</div><div class="value" id="stat-watchdog"><span class="dot"></span>--</div></div>
+        <div class="card"><div class="label">Controller</div><div class="value" id="stat-controller"><span class="dot"></span>--</div></div>
+    </div>
+
+    <div class="script-list">
+        {% for s in scripts %}
+        <a class="script-card" href="/run/{{ s.id }}">
+            <span>{{ s.name }}</span>
+            <span class="badge" id="badge-{{ s.id }}">--</span>
+        </a>
+        {% endfor %}
+    </div>
+
+    <script>
+        function fmtTemp(v) { return v == null ? "N/A" : v.toFixed(1) + "°C"; }
+
+        function setDot(el, ok) {
+            const dot = el.querySelector(".dot");
+            dot.className = "dot " + (ok ? "ok" : "bad");
+        }
+
+        function stopCurrent() {
+            fetch("/api/stop", {method: "POST"});
+        }
+
+        function applyStatus(payload) {
+            const running = payload.running;
+            const banner = document.getElementById("running-banner");
+            document.querySelectorAll(".badge").forEach(b => { b.textContent = "oprit"; b.classList.remove("running"); });
+            if (running) {
+                banner.style.display = "flex";
+                document.getElementById("running-name").textContent = running.id;
+                const badge = document.getElementById("badge-" + running.id);
+                if (badge) { badge.textContent = "ruleaza"; badge.classList.add("running"); }
+            } else {
+                banner.style.display = "none";
+            }
+
+            const s = payload.stats;
+            document.getElementById("stat-cpu").textContent = fmtTemp(s.cpu_temp_c);
+            document.getElementById("stat-hailo").textContent = fmtTemp(s.hailo_temp_c);
+
+            const relayEl = document.getElementById("stat-relay");
+            setDot(relayEl, s.esp32.relay_on);
+            relayEl.lastChild.textContent = s.esp32.relay_on ? " ON" : " OFF";
+
+            const espEl = document.getElementById("stat-esp32");
+            setDot(espEl, s.esp32.esp32_connected);
+            espEl.lastChild.textContent = s.esp32.esp32_connected ? " conectat" : " deconectat";
+
+            const wdEl = document.getElementById("stat-watchdog");
+            setDot(wdEl, s.esp32.watchdog_armed);
+            wdEl.lastChild.textContent = s.esp32.watchdog_armed ? " armat" : " inarmat";
+
+            const ctlEl = document.getElementById("stat-controller");
+            setDot(ctlEl, s.controller.connected);
+            ctlEl.lastChild.textContent = s.controller.connected ? " " + s.controller.name : " neconectat";
+        }
+
+        const src = new EventSource("/api/stream/status");
+        src.onmessage = (e) => applyStatus(JSON.parse(e.data));
+    </script>
+</body>
+</html>

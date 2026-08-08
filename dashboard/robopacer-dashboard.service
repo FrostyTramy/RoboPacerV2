@@ -1,0 +1,16 @@
+[Unit]
+Description=RoboPacerV2 web dashboard (start/stop scripts, live console, system stats)
+After=multi-user.target network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/pi/RoboPacerV2/dashboard
+ExecStart=/usr/bin/python3 /home/pi/RoboPacerV2/dashboard/app.py
+Restart=always
+RestartSec=2
+User=pi
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

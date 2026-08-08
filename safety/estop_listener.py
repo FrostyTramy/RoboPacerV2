@@ -7,10 +7,16 @@ Doua responsabilitati:
   2. Citeste !!ESTOP!! de la ESP32 si omoara toate procesele Python din
      PROJECT_DIR (main.py, data_recorder.py etc.) prin SIGTERM then SIGKILL.
 
+Pe langa astea, tine o stare partajata (releu/ESP32/watchdog) interogabila
+pe acelasi Unix socket ca RELAY_ON/RELAY_OFF, trimitand "STATUS" - folosita
+de dashboard-ul web ca sa afiseze starea fara sa mai vorbeasca ea insasi cu
+portul serial (portul e detinut exclusiv de procesul asta).
+
 Ruleaza ca serviciu systemd (estop-listener.service) — porneste la boot,
 se restarteaza automat daca se blocheaza.
 """
 
+import json
 import logging
 import os
 import queue
@@ -40,6 +46,30 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+
+# Stare partajata intre thread-ul serial (scrie) si thread-ul de socket
+# (citeste, ca sa raspunda la "STATUS"). Nu e nevoie de lock separat pentru
+# citire/scriere de valori simple in Python (GIL), dar il folosim oricum ca
+# sa nu trimitem un snapshot pe jumatate actualizat.
+_state = {
+    "esp32_connected":  False,
+    "relay_on":         False,
+    "watchdog_armed":   False,
+    "last_esp32_line":  None,
+    "last_update":      time.time(),
+}
+_state_lock = threading.Lock()
+
+
+def _update_state(**kwargs):
+    with _state_lock:
+        _state.update(kwargs)
+        _state["last_update"] = time.time()
+
+
+def _state_snapshot():
+    with _state_lock:
+        return dict(_state)
 
 
 def _handle_sigterm(signum, frame):
@@ -99,6 +129,11 @@ def _socket_relay_loop(relay_queue, stop_event):
                     relay_queue.put("ON")
                 elif data == "RELAY_OFF":
                     relay_queue.put("OFF")
+                elif data == "STATUS":
+                    try:
+                        conn.sendall(json.dumps(_state_snapshot()).encode() + b"\n")
+                    except OSError:
+                        pass
     finally:
         srv.close()
         try:
@@ -181,6 +216,7 @@ def main():
     try:
         while True:
             ser = connect_serial()
+            _update_state(esp32_connected=True)
 
             stop_event = threading.Event()
             hb_thread  = threading.Thread(
@@ -213,6 +249,14 @@ def main():
                     if "[WD]" not in line and "HB" not in line:
                         logging.info(f"ESP32: {line!r}")
 
+                    _update_state(last_esp32_line=line)
+                    if "[RELAY]" in line and "Ignorat" not in line:
+                        _update_state(relay_on="ON" in line)
+                    elif line == "[WD] Armat":
+                        _update_state(watchdog_armed=True)
+                    elif "[WD]" in line and "pierdut" in line:
+                        _update_state(watchdog_armed=False)
+
                     if ESTOP_MARKER in line:
                         logging.warning(f"ESTOP PRIMIT: {line!r}")
                         kill_target_processes()
@@ -222,6 +266,7 @@ def main():
             finally:
                 stop_event.set()
                 hb_thread.join(timeout=2)
+                _update_state(esp32_connected=False, watchdog_armed=False)
                 try:
                     ser.close()
                 except Exception:

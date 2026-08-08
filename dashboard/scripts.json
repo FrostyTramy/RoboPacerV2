@@ -1,0 +1,12 @@
+[
+  {
+    "id": "main",
+    "name": "Autonomous Drive (main.py)",
+    "path": "/home/pi/RoboPacerV2/main/main.py"
+  },
+  {
+    "id": "data_recorder",
+    "name": "Data Recorder",
+    "path": "/home/pi/RoboPacerV2/data_recorder/data_recorder.py"
+  }
+]

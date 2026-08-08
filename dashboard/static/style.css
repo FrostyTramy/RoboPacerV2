@@ -1,0 +1,125 @@
+:root {
+    --bg: #0f1115;
+    --panel: #181b22;
+    --border: #2a2e37;
+    --text: #e6e8eb;
+    --muted: #8b93a1;
+    --accent: #4f8cff;
+    --ok: #3ecf7e;
+    --bad: #e5534b;
+    --warn: #e5b93b;
+}
+
+* { box-sizing: border-box; }
+
+body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: 16px;
+    max-width: 720px;
+    margin: 0 auto;
+}
+
+h1 { font-size: 1.4rem; margin: 8px 0 16px; }
+a { color: var(--accent); text-decoration: none; }
+
+.grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 10px;
+    margin-bottom: 20px;
+}
+
+.card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 14px;
+}
+
+.card .label { color: var(--muted); font-size: 0.75rem; text-transform: uppercase; }
+.card .value { font-size: 1.25rem; margin-top: 4px; font-weight: 600; }
+
+.dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; }
+.dot.ok { background: var(--ok); }
+.dot.bad { background: var(--bad); }
+.dot.warn { background: var(--warn); }
+
+.script-list { display: flex; flex-direction: column; gap: 8px; }
+
+.script-card {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+}
+
+.badge {
+    font-size: 0.75rem;
+    padding: 3px 8px;
+    border-radius: 999px;
+    background: var(--border);
+    color: var(--muted);
+}
+.badge.running { background: rgba(62, 207, 126, 0.15); color: var(--ok); }
+
+.banner {
+    background: rgba(79, 140, 255, 0.1);
+    border: 1px solid rgba(79, 140, 255, 0.35);
+    border-radius: 10px;
+    padding: 12px 14px;
+    margin-bottom: 16px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+}
+
+button {
+    font-size: 1rem;
+    padding: 10px 20px;
+    border-radius: 8px;
+    border: none;
+    cursor: pointer;
+    font-weight: 600;
+}
+
+.btn-start { background: var(--ok); color: #06210f; }
+.btn-stop  { background: var(--bad); color: #2a0a08; }
+.btn-small { padding: 6px 12px; font-size: 0.85rem; }
+
+#console {
+    background: #05060a;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px;
+    height: 60vh;
+    overflow-y: auto;
+    font-family: "SFMono-Regular", Consolas, monospace;
+    font-size: 0.82rem;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.controls { display: flex; gap: 10px; align-items: center; margin: 14px 0; }
+
+.modal-backdrop {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.6);
+    align-items: center; justify-content: center;
+}
+.modal-backdrop.open { display: flex; }
+.modal {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    max-width: 320px;
+}
+.modal .actions { display: flex; gap: 10px; margin-top: 16px; justify-content: flex-end; }

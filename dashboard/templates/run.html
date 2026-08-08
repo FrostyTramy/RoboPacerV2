@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="ro">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ script.name }} - RoboPacer</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <a href="/">&larr; RoboPacer</a>
+    <h1>{{ script.name }}</h1>
+
+    <div class="controls">
+        <span class="badge" id="status-badge">--</span>
+        <button class="btn-start" id="btn-start" onclick="start(false)">Start</button>
+        <button class="btn-stop" id="btn-stop" onclick="stop()" style="display:none">Stop</button>
+    </div>
+
+    <div id="console"></div>
+
+    <div class="modal-backdrop" id="conflict-modal">
+        <div class="modal">
+            <p id="conflict-text"></p>
+            <div class="actions">
+                <button class="btn-small" onclick="closeModal()">Anuleaza</button>
+                <button class="btn-stop btn-small" onclick="start(true)">Opreste-l si porneste</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const scriptId = {{ script.id | tojson }};
+        const consoleEl = document.getElementById("console");
+
+        function closeModal() {
+            document.getElementById("conflict-modal").classList.remove("open");
+        }
+
+        function start(force) {
+            fetch("/api/start", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({id: scriptId, force: force}),
+            }).then(async r => {
+                closeModal();
+                if (r.status === 409) {
+                    const body = await r.json();
+                    document.getElementById("conflict-text").textContent =
+                        "Ruleaza deja '" + body.running.id + "'. Il opresti si pornesti '" + scriptId + "'?";
+                    document.getElementById("conflict-modal").classList.add("open");
+                }
+            });
+        }
+
+        function stop() {
+            fetch("/api/stop", {method: "POST"});
+        }
+
+        function applyStatus(payload) {
+            const running = payload.running;
+            const isThisRunning = running && running.id === scriptId;
+            const badge = document.getElementById("status-badge");
+            document.getElementById("btn-start").style.display = isThisRunning ? "none" : "inline-block";
+            document.getElementById("btn-stop").style.display = isThisRunning ? "inline-block" : "none";
+
+            if (isThisRunning) {
+                badge.textContent = "ruleaza (PID " + running.pid + ", " + Math.floor(running.uptime_seconds) + "s)";
+                badge.classList.add("running");
+            } else if (running) {
+                badge.textContent = "alt script ruleaza: " + running.id;
+                badge.classList.remove("running");
+            } else {
+                badge.textContent = "oprit";
+                badge.classList.remove("running");
+            }
+        }
+
+        const statusSrc = new EventSource("/api/stream/status");
+        statusSrc.onmessage = (e) => applyStatus(JSON.parse(e.data));
+
+        const logSrc = new EventSource("/api/stream/log/" + scriptId);
+        logSrc.onmessage = (e) => {
+            const atBottom = consoleEl.scrollTop + consoleEl.clientHeight >= consoleEl.scrollHeight - 20;
+            consoleEl.textContent += e.data + "\n";
+            if (atBottom) consoleEl.scrollTop = consoleEl.scrollHeight;
+        };
+    </script>
+</body>
+</html>

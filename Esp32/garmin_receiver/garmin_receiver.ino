@@ -3,8 +3,8 @@
 #include <BLEUtils.h>
 
 #define DEVICE_NAME         "Pacer1"
-#define RELAY_PIN           26
-#define LED_PIN             2
+#define RELAY_PIN           13
+#define LED_PIN             4
 #define WATCHDOG_TIMEOUT_MS 2000
 
 #include "secrets.h"  // APP_SECRET[], APP_SECRET_LEN

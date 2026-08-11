@@ -94,8 +94,19 @@
             }
         }
 
-        const statusSrc = new EventSource("/api/stream/status");
-        statusSrc.onmessage = (e) => applyStatus(JSON.parse(e.data));
+        // EventSource-urile astea tin conexiunea deschisa permanent - un
+        // browser permite doar 6 conexiuni simultane pe aceeasi origine
+        // (HTTP/1.1). Daca tab-uri vechi raman deschise in fundal (alt tab,
+        // telefon care nu inchide pagina), sloturile astea raman ocupate si
+        // paginile noi incep sa se incarce tot mai greu. Solutia: inchidem
+        // ambele stream-uri cand tab-ul iese din prim-plan si le redeschidem
+        // cand revii, ca sa nu tinem conexiuni degeaba in fundal.
+        let statusSrc = null;
+        function openStatusStream() {
+            if (statusSrc) statusSrc.close();
+            statusSrc = new EventSource("/api/stream/status");
+            statusSrc.onmessage = (e) => applyStatus(JSON.parse(e.data));
+        }
 
         let logSrc = null;
         function openLogStream() {
@@ -107,7 +118,19 @@
                 if (atBottom) consoleEl.scrollTop = consoleEl.scrollHeight;
             };
         }
+
+        openStatusStream();
         openLogStream();
+
+        document.addEventListener("visibilitychange", () => {
+            if (document.hidden) {
+                if (statusSrc) { statusSrc.close(); statusSrc = null; }
+                if (logSrc) { logSrc.close(); logSrc = null; }
+            } else {
+                openStatusStream();
+                openLogStream();
+            }
+        });
     </script>
 </body>
 </html>

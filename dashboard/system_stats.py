@@ -55,10 +55,32 @@ def get_cpu_temp():
         return None
 
 
+_HAILO_TEMP_CACHE_SECONDS = 30  # vezi comentariul de mai jos
+_hailo_cache = {"value": None, "checked_at": 0.0}
+_hailo_cache_lock = threading.Lock()
+
+
 def get_hailo_temp():
     """Temperatura chip-ului Hailo-8. Poate esua/dura daca device-ul e
     deja deschis exclusiv de main.py - in acel caz se intoarce None dupa
-    un timeout scurt, in loc sa blocheze pagina de status."""
+    un timeout scurt, in loc sa blocheze pagina de status.
+
+    Fiecare citire reala deschide un hailo_platform.VDevice - iar biblioteca
+    HailoRT lasa in urma cateva thread-uri native care nu se mai inchid
+    niciodata dupa ce VDevice e eliberat (confirmat empiric: thread count-ul
+    procesului creste cu fiecare apel si nu mai coboara - nu e ceva
+    controlabil din partea noastra, tine de biblioteca vendor inchisa).
+    Pagina de status cheruie stats-urile la fiecare 2s din fiecare tab
+    deschis - fara cache, asta ar acumula thread-uri suficient de repede
+    incat sa incetineasca vizibil tot procesul Flask dupa doar cateva
+    minute de dashboard deschis (asta a fost cauza lag-ului raportat).
+    De-aia se refolosc ultima valoare cunoscuta si se reinterogheaza
+    hardware-ul doar o data la _HAILO_TEMP_CACHE_SECONDS."""
+    now = time.time()
+    with _hailo_cache_lock:
+        if now - _hailo_cache["checked_at"] < _HAILO_TEMP_CACHE_SECONDS:
+            return _hailo_cache["value"]
+        _hailo_cache["checked_at"] = now  # marcat imediat - nu pornim mai multe citiri in paralel
 
     def _read():
         from hailo_platform import VDevice
@@ -67,7 +89,10 @@ def get_hailo_temp():
             t = dev.control.get_chip_temperature()
             return round((t.ts0_temperature + t.ts1_temperature) / 2, 1)
 
-    return _run_with_timeout(_read, timeout=3.0)
+    value = _run_with_timeout(_read, timeout=3.0)
+    with _hailo_cache_lock:
+        _hailo_cache["value"] = value
+    return value
 
 
 def get_controller_status():

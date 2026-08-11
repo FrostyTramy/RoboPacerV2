@@ -78,8 +78,23 @@
             ctlEl.lastChild.textContent = s.controller.connected ? " " + s.controller.name : " neconectat";
         }
 
-        const src = new EventSource("/api/stream/status");
-        src.onmessage = (e) => applyStatus(JSON.parse(e.data));
+        // Vezi run.html - inchidem stream-ul cand tab-ul e in fundal, ca sa
+        // nu ocupam degeaba din cele 6 conexiuni permise per origine.
+        let src = null;
+        function openStatusStream() {
+            if (src) src.close();
+            src = new EventSource("/api/stream/status");
+            src.onmessage = (e) => applyStatus(JSON.parse(e.data));
+        }
+        openStatusStream();
+
+        document.addEventListener("visibilitychange", () => {
+            if (document.hidden) {
+                if (src) { src.close(); src = null; }
+            } else {
+                openStatusStream();
+            }
+        });
     </script>
 </body>
 </html>

@@ -16,5 +16,10 @@
       {"flag": "--legacy", "label": "Format clasic (fara timestamp)"},
       {"flag": "--display", "label": "Fereastra preview (cv2)"}
     ]
+  },
+  {
+    "id": "manual_drive",
+    "name": "Manual Drive (controller)",
+    "path": "/home/pi/RoboPacerV2/manual_drive/manual_drive.py"
   }
 ]

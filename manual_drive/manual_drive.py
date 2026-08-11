@@ -23,6 +23,7 @@ import os
 import select
 import signal
 import socket
+import threading
 import time
 
 import board
@@ -33,6 +34,8 @@ from evdev import InputDevice, ecodes, ff, list_devices
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_FILE_PATH = os.path.join(BASE_DIR, "manual_drive.log")
+SPEED_LOG_DIR = os.path.join(BASE_DIR, "speed_logs")
+os.makedirs(SPEED_LOG_DIR, exist_ok=True)
 
 logging.basicConfig(
     filename=LOG_FILE_PATH,
@@ -74,6 +77,15 @@ BTN_STOP = ecodes.BTN_B
 AXIS_CENTER = 32767
 AXIS_MAX = 65535
 LABEL_DEADZONE = 0.2
+
+# ---------------------------------------------------------------------------
+# Odometrie (RPM de la ESP32 via estop_listener) - vezi tools/odometry.py,
+# acelasi socket si aceeasi formula de conversie RPM -> km/h.
+# ---------------------------------------------------------------------------
+ODO_SOCKET = "/tmp/esp32_odometry.sock"
+WHEEL_CIRCUMFERENCE_M = 0.1257  # diametru 40mm -> pi x 0.04
+ODO_RECONNECT_SLEEP_SECONDS = 2.0
+SPEED_LOG_INTERVAL_SECONDS = 0.5
 
 # Vezi data_recorder.py - erori I2C tranzitorii de logat-si-continuat, nu de
 # crash-uit programul pentru ele (bus/wiring glitch pe un sasiu care vibreaza).
@@ -174,6 +186,75 @@ def find_xbox_controller():
     return None
 
 
+_odo_state = {"rpm": 0.0}
+_odo_lock = threading.Lock()
+
+
+def _set_rpm(value):
+    with _odo_lock:
+        _odo_state["rpm"] = value
+
+
+def _get_rpm():
+    with _odo_lock:
+        return _odo_state["rpm"]
+
+
+def _odo_reader_loop(stop_event):
+    """Thread separat, cat tine tot programul: tine la zi ultimul RPM primit
+    de la estop_listener (acelasi socket/format ca tools/odometry.py). Daca
+    socket-ul pica sau estop_listener nu ruleaza inca, RPM cade la 0 (nu
+    ramane "inghetat" la ultima viteza cunoscuta) si se reincearca periodic -
+    logul de viteza tot iese, doar cu valori 0 cat nu exista conexiune."""
+    while not stop_event.is_set():
+        try:
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock.settimeout(1.0)
+            sock.connect(ODO_SOCKET)
+        except OSError:
+            stop_event.wait(ODO_RECONNECT_SLEEP_SECONDS)
+            continue
+
+        buf = ""
+        try:
+            while not stop_event.is_set():
+                try:
+                    data = sock.recv(64).decode("utf-8", errors="replace")
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+                if not data:
+                    break
+                buf += data
+                while "\n" in buf:
+                    line, buf = buf.split("\n", 1)
+                    line = line.strip()
+                    if not line.startswith("RPM:"):
+                        continue
+                    try:
+                        _set_rpm(float(line[4:]))
+                    except ValueError:
+                        continue
+        finally:
+            sock.close()
+            _set_rpm(0.0)
+            if not stop_event.is_set():
+                stop_event.wait(ODO_RECONNECT_SLEEP_SECONDS)
+
+
+def _rpm_to_kmh(rpm):
+    return rpm * WHEEL_CIRCUMFERENCE_M * 60 / 1000
+
+
+def _format_pace(kmh):
+    """mm:ss per km, ca la un ceas de alergare - "--:--" cand nu se misca."""
+    if kmh <= 0:
+        return "--:--"
+    pace_sec = 3600 / kmh
+    return f"{int(pace_sec // 60)}:{int(pace_sec % 60):02d}"
+
+
 def _handle_sigterm(signum, frame):
     """Vezi data_recorder.py - fara asta SIGTERM sare peste `finally` si lasa
     ESC-ul la ultimul puls trimis."""
@@ -201,6 +282,10 @@ def main():
     steering = None
     controller = None
     last_rumble_effect_id = None
+    odo_thread = None
+    odo_stop_event = None
+    speed_log_file = None
+    speed_samples = []  # (rpm, kmh) la fiecare SPEED_LOG_INTERVAL_SECONDS
 
     def rumble(duration_ms):
         """Vezi data_recorder.py - rumble non-blocant, un singur efect activ
@@ -226,8 +311,26 @@ def main():
         except OSError as e:
             logging.warning(f"Rumble esuat: {e}")
 
+    # Definit inaintea oricarui cod care poate arunca exceptie - blocul
+    # `finally` foloseste asta la calculul duratei chiar si daca pornirea
+    # a picat devreme (ex: controller negasit, log de viteza nescriibil).
+    run_start_time = time.time()
+
     try:
         _relay_cmd("RELAY_ON")
+
+        speed_log_path = os.path.join(
+            SPEED_LOG_DIR, f"speed_{time.strftime('%Y%m%d_%H%M%S')}.csv")
+        speed_log_file = open(speed_log_path, "w")
+        speed_log_file.write("elapsed_s,rpm,kmh,pace_mmss\n")
+        speed_log_file.flush()
+        print(f"Log de viteza: {speed_log_path}")
+
+        odo_stop_event = threading.Event()
+        odo_thread = threading.Thread(
+            target=_odo_reader_loop, args=(odo_stop_event,), daemon=True)
+        odo_thread.start()
+
         i2c = busio.I2C(board.SCL, board.SDA)
         pca = PCA9685(i2c)
         pca.frequency = PCA_FREQUENCY_HZ
@@ -253,6 +356,7 @@ def main():
         gas_value = 0
         brake_value = 0
         is_paused = False
+        last_speed_log_time = run_start_time
 
         while True:
             ready, _, _ = select.select([controller_fd], [], [], 0.001)
@@ -292,7 +396,23 @@ def main():
                         elif event.code == BTN_STOP:
                             raise KeyboardInterrupt
 
-            print(f"{'PAUZA' if is_paused else 'ACTIV '} | viraj {steering.angle:3d} | gas {gas_value:4d} | brake {brake_value:4d}", end="\r")
+            rpm = _get_rpm()
+            kmh = _rpm_to_kmh(rpm)
+
+            now = time.time()
+            if now - last_speed_log_time >= SPEED_LOG_INTERVAL_SECONDS:
+                last_speed_log_time = now
+                pace = _format_pace(kmh)
+                speed_samples.append((rpm, kmh))
+                speed_log_file.write(f"{now - run_start_time:.1f},{rpm:.2f},{kmh:.2f},{pace}\n")
+                speed_log_file.flush()
+
+            print(
+                f"{'PAUZA' if is_paused else 'ACTIV '} | viraj {steering.angle:3d} | "
+                f"gas {gas_value:4d} | brake {brake_value:4d} | "
+                f"{kmh:5.2f} km/h | pace {_format_pace(kmh)}/km",
+                end="\r",
+            )
             time.sleep(0.01)
 
     except (KeyboardInterrupt, ConnectionError) as e:
@@ -319,6 +439,34 @@ def main():
                 pca.deinit()
             except OSError as e:
                 logging.warning(f"I2C error during pca.deinit(): {e}")
+
+        if odo_stop_event is not None:
+            odo_stop_event.set()
+        if odo_thread is not None:
+            odo_thread.join(timeout=2)
+
+        if speed_log_file is not None:
+            if speed_samples:
+                rpm_vals = [s[0] for s in speed_samples]
+                kmh_vals = [s[1] for s in speed_samples]
+                moving_kmh_vals = [k for k in kmh_vals if k > 0]
+                avg_rpm = sum(rpm_vals) / len(rpm_vals)
+                max_rpm = max(rpm_vals)
+                avg_kmh_moving = sum(moving_kmh_vals) / len(moving_kmh_vals) if moving_kmh_vals else 0.0
+                max_kmh = max(kmh_vals)
+                summary = (
+                    "\n--- SUMAR ---\n"
+                    f"Durata: {time.time() - run_start_time:.1f}s | {len(speed_samples)} esantioane (la {SPEED_LOG_INTERVAL_SECONDS}s)\n"
+                    f"RPM   -> mediu {avg_rpm:.2f} | maxim {max_rpm:.2f}\n"
+                    f"km/h  -> mediu {avg_kmh_moving:.2f} (cat timp s-a miscat) | maxim {max_kmh:.2f}\n"
+                    f"Pace  -> mediu {_format_pace(avg_kmh_moving)}/km | cel mai bun {_format_pace(max_kmh)}/km\n"
+                )
+            else:
+                summary = "\n--- SUMAR ---\nNiciun esantion inregistrat.\n"
+            speed_log_file.write(summary)
+            speed_log_file.close()
+            print(summary)
+
         logging.info("Manual drive stopped")
         print("\nHardware oprit si curatat. Program inchis.")
 

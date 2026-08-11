@@ -211,6 +211,20 @@ def _heartbeat_loop(ser, stop_event):
         stop_event.wait(HEARTBEAT_INTERVAL_SECONDS)
 
 
+# Scripturi excluse de la kill-ul de ESTOP desi ruleaza sub PROJECT_DIR:
+# dashboard/app.py nu atinge niciodata motorul/servo-ul direct (doar
+# porneste/opreste alte scripturi si citeste stare) - nu exista niciun
+# motiv de siguranta sa fie omorat. Inainte era omorat la FIECARE ESTOP
+# (inclusiv unul declansat de la ceas, complet independent de vreun script
+# de condus), systemd il repornea imediat (Restart=always), iar in acel
+# interval de haos dashboard-ul vechi/nou + un script de condus orfan
+# ajungeau sa scrie concurrent pe acelasi canal PCA9685 - confirmat empiric
+# cu un monitor live pe registrele PCA9685: un puls neutru corect scris de
+# scriptul nou era suprascris cu "full-off" la cateva sute de ms, exact in
+# fereastra de armare a ESC-ului.
+_KILL_EXCLUDE_BASENAMES = ("dashboard/app.py",)
+
+
 def _find_target_processes():
     self_pid = os.getpid()
     targets = []
@@ -222,8 +236,11 @@ def _find_target_processes():
             name    = (proc.info.get("name") or "").lower()
             is_python = name.startswith("python") or (
                 cmdline and os.path.basename(cmdline[0]).lower().startswith("python"))
-            if is_python and any(PROJECT_DIR in arg for arg in cmdline):
-                targets.append(proc)
+            if not is_python or not any(PROJECT_DIR in arg for arg in cmdline):
+                continue
+            if any(excl in arg for arg in cmdline for excl in _KILL_EXCLUDE_BASENAMES):
+                continue
+            targets.append(proc)
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
     return targets

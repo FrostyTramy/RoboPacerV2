@@ -6,6 +6,14 @@
 #define RELAY_PIN           13
 #define LED_PIN             4
 #define WATCHDOG_TIMEOUT_MS 2000
+#define ENCODER_PIN         14   // A0 al KY-024 conectat la GPIO14
+#define MAG_THRESHOLD_ON    1000  // val < asta = magnet detectat
+#define MAG_THRESHOLD_OFF   1500 // val > asta = magnet disparut
+#define MAGNETS             4
+
+unsigned long lastPulseUs      = 0;
+unsigned long pulseIntervalUs  = 0;
+bool          magnetPresent    = false;
 
 #include "secrets.h"  // APP_SECRET[], APP_SECRET_LEN
 
@@ -96,6 +104,8 @@ void setup() {
     digitalWrite(RELAY_PIN, LOW);
     digitalWrite(LED_PIN,   LOW);
 
+    pinMode(ENCODER_PIN, INPUT);
+
     String advName = String("GarminPacer|") + DEVICE_NAME;
     BLEDevice::init(advName.c_str());
 
@@ -156,5 +166,31 @@ void loop() {
         setRelay(false);
     }
 
-    delay(10);
+    // Citeste analogic A0
+    int val = analogRead(ENCODER_PIN);
+    bool magnet;
+    if (!magnetPresent) {
+        magnet = (val < MAG_THRESHOLD_ON);   // detectat doar sub 900
+    } else {
+        magnet = (val < MAG_THRESHOLD_OFF);  // resetat doar cand trece peste 1500
+    }
+
+    if (magnet && !magnetPresent) {
+        unsigned long now = micros();
+        if (lastPulseUs > 0) {
+            pulseIntervalUs = now - lastPulseUs;
+            float rpm = 60000000.0 / ((float)pulseIntervalUs * MAGNETS);
+            Serial.printf("RPM:%.2f\n", rpm);
+        }
+        lastPulseUs = now;
+    }
+    magnetPresent = magnet;
+
+    // Daca nu mai vin pulsuri de 500ms, RPM = 0
+    if (lastPulseUs > 0 && (micros() - lastPulseUs) > 500000) {
+        lastPulseUs     = 0;
+        pulseIntervalUs = 0;
+        Serial.println("RPM:0.00");
+    }
+
 }

@@ -40,6 +40,9 @@ SIGTERM_WAIT_SECONDS       = 5
 RECONNECT_SLEEP_SECONDS    = 2
 QUIET_RETRY_LOG_EVERY      = 30
 
+# Odometrie
+WHEEL_CIRCUMFERENCE_M      = 0.1257  # diametru 40mm -> π × 0.04
+
 logging.basicConfig(
     stream=sys.stdout,
     level=logging.INFO,
@@ -244,6 +247,22 @@ def main():
                         continue
                     line = raw.decode("utf-8", errors="replace").strip()
                     if not line:
+                        continue
+
+                    # RPM → km/h + pace
+                    if line.startswith("RPM:"):
+                        try:
+                            rpm = float(line[4:])
+                            if rpm > 0:
+                                kmh  = rpm * WHEEL_CIRCUMFERENCE_M * 60 / 1000
+                                pace_sec = 3600 / kmh
+                                pace_min = int(pace_sec // 60)
+                                pace_s   = int(pace_sec % 60)
+                                print(f"\r[ODO] {kmh:.2f} km/h  |  pace: {pace_min}:{pace_s:02d} /km   ", end="", flush=True)
+                            else:
+                                print(f"\r[ODO] 0.00 km/h  |  pace: --:--          ", end="", flush=True)
+                        except ValueError:
+                            pass
                         continue
 
                     if "[WD]" not in line and "HB" not in line:

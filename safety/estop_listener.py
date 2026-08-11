@@ -97,7 +97,17 @@ def connect_serial():
             time.sleep(RECONNECT_SLEEP_SECONDS)
             continue
         try:
-            ser = serial.Serial(port, BAUD_RATE, timeout=1)
+            ser = serial.Serial()
+            ser.port = port
+            ser.baudrate = BAUD_RATE
+            ser.timeout = 1
+            # Fara asta placa ramane blocata in bootloader (GPIO0 tinut jos
+            # de circuitul de auto-reset al CH340) si nu ajunge sa ruleze
+            # firmware-ul deloc - simptom: nicio linie pe serial, ESP32
+            # invizibil pe BLE, desi placa e alimentata si USB-ul e ok.
+            ser.dtr = False
+            ser.rts = False
+            ser.open()
             logging.info(f"Conectat la {port} @ {BAUD_RATE} baud.")
             return ser
         except serial.SerialException as e:

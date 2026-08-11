@@ -175,11 +175,21 @@ def api_start():
     data = request.get_json(force=True, silent=True) or {}
     script_id = data.get("id")
     force = bool(data.get("force"))
+    requested_args = data.get("args") or []
 
     scripts = load_scripts()
     script = find_script(script_id, scripts)
     if script is None:
         return jsonify({"error": "unknown_script"}), 404
+
+    # Doar flag-urile listate in scripts.json pentru scriptul asta sunt
+    # acceptate - evita sa injectam argumente arbitrare in subprocess.
+    allowed_flags = {f["flag"] for f in script.get("flags", [])}
+    if not isinstance(requested_args, list) or not all(isinstance(a, str) for a in requested_args):
+        return jsonify({"error": "invalid_args"}), 400
+    unknown = [a for a in requested_args if a not in allowed_flags]
+    if unknown:
+        return jsonify({"error": "unknown_flag", "flags": unknown}), 400
 
     current = _status_payload()
     if current is not None:
@@ -196,7 +206,7 @@ def api_start():
     log_file = open(log_path_for(script_id), "wb", buffering=0)
     try:
         popen = subprocess.Popen(
-            ["python3", script["path"]],
+            ["python3", "-u", script["path"], *requested_args],
             stdout=log_file, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
             cwd=os.path.dirname(script["path"]),
             start_new_session=True,

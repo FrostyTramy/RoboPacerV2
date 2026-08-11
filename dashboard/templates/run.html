@@ -10,6 +10,17 @@
     <a href="/">&larr; RoboPacer</a>
     <h1>{{ script.name }}</h1>
 
+    {% if script.flags %}
+    <div class="flags" id="flags-box">
+        {% for f in script.flags %}
+        <label class="flag-option">
+            <input type="checkbox" class="flag-checkbox" value="{{ f.flag }}">
+            {{ f.label }}
+        </label>
+        {% endfor %}
+    </div>
+    {% endif %}
+
     <div class="controls">
         <span class="badge" id="status-badge">--</span>
         <button class="btn-start" id="btn-start" onclick="start(false)">Start</button>
@@ -36,11 +47,15 @@
             document.getElementById("conflict-modal").classList.remove("open");
         }
 
+        function selectedArgs() {
+            return Array.from(document.querySelectorAll(".flag-checkbox:checked")).map(c => c.value);
+        }
+
         function start(force) {
             fetch("/api/start", {
                 method: "POST",
                 headers: {"Content-Type": "application/json"},
-                body: JSON.stringify({id: scriptId, force: force}),
+                body: JSON.stringify({id: scriptId, force: force, args: selectedArgs()}),
             }).then(async r => {
                 closeModal();
                 if (r.status === 409) {
@@ -48,6 +63,9 @@
                     document.getElementById("conflict-text").textContent =
                         "Ruleaza deja '" + body.running.id + "'. Il opresti si pornesti '" + scriptId + "'?";
                     document.getElementById("conflict-modal").classList.add("open");
+                } else if (r.ok) {
+                    consoleEl.textContent = "";
+                    openLogStream();
                 }
             });
         }
@@ -62,6 +80,7 @@
             const badge = document.getElementById("status-badge");
             document.getElementById("btn-start").style.display = isThisRunning ? "none" : "inline-block";
             document.getElementById("btn-stop").style.display = isThisRunning ? "inline-block" : "none";
+            document.querySelectorAll(".flag-checkbox").forEach(c => { c.disabled = isThisRunning; });
 
             if (isThisRunning) {
                 badge.textContent = "ruleaza (PID " + running.pid + ", " + Math.floor(running.uptime_seconds) + "s)";
@@ -78,12 +97,17 @@
         const statusSrc = new EventSource("/api/stream/status");
         statusSrc.onmessage = (e) => applyStatus(JSON.parse(e.data));
 
-        const logSrc = new EventSource("/api/stream/log/" + scriptId);
-        logSrc.onmessage = (e) => {
-            const atBottom = consoleEl.scrollTop + consoleEl.clientHeight >= consoleEl.scrollHeight - 20;
-            consoleEl.textContent += e.data + "\n";
-            if (atBottom) consoleEl.scrollTop = consoleEl.scrollHeight;
-        };
+        let logSrc = null;
+        function openLogStream() {
+            if (logSrc) logSrc.close();
+            logSrc = new EventSource("/api/stream/log/" + scriptId);
+            logSrc.onmessage = (e) => {
+                const atBottom = consoleEl.scrollTop + consoleEl.clientHeight >= consoleEl.scrollHeight - 20;
+                consoleEl.textContent += e.data + "\n";
+                if (atBottom) consoleEl.scrollTop = consoleEl.scrollHeight;
+            };
+        }
+        openLogStream();
     </script>
 </body>
 </html>

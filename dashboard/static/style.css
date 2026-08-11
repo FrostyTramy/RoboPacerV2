@@ -108,6 +108,19 @@ button {
 
 .controls { display: flex; gap: 10px; align-items: center; margin: 14px 0; }
 
+.flags {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 14px;
+    margin-top: 4px;
+}
+.flag-option { display: flex; align-items: center; gap: 8px; font-size: 0.9rem; cursor: pointer; }
+.flag-option input { width: 16px; height: 16px; }
+
 .modal-backdrop {
     display: none;
     position: fixed; inset: 0;

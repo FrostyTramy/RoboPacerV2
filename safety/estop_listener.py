@@ -41,7 +41,7 @@ RECONNECT_SLEEP_SECONDS    = 2
 QUIET_RETRY_LOG_EVERY      = 30
 
 # Odometrie
-WHEEL_CIRCUMFERENCE_M      = 0.1257  # diametru 40mm -> π × 0.04
+ODO_SOCKET                 = "/tmp/esp32_odometry.sock"
 
 logging.basicConfig(
     stream=sys.stdout,
@@ -103,6 +103,51 @@ def connect_serial():
         except serial.SerialException as e:
             logging.warning(f"Nu pot deschide {port}: {e} - reincerc in {RECONNECT_SLEEP_SECONDS}s.")
             time.sleep(RECONNECT_SLEEP_SECONDS)
+
+
+_odo_clients: list = []
+_odo_lock = threading.Lock()
+
+
+def _odo_server_loop(stop_event):
+    """Accepta clienti pe ODO_SOCKET si le trimite fiecare linie RPM:xxx."""
+    try:
+        os.unlink(ODO_SOCKET)
+    except OSError:
+        pass
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(ODO_SOCKET)
+    srv.listen(5)
+    srv.settimeout(1.0)
+    try:
+        while not stop_event.is_set():
+            try:
+                conn, _ = srv.accept()
+                with _odo_lock:
+                    _odo_clients.append(conn)
+            except socket.timeout:
+                continue
+    finally:
+        srv.close()
+        try:
+            os.unlink(ODO_SOCKET)
+        except OSError:
+            pass
+
+
+def _odo_broadcast(line: str):
+    """Trimite linia RPM:xxx tuturor clientilor conectati."""
+    data = (line + "\n").encode()
+    with _odo_lock:
+        dead = []
+        for conn in _odo_clients:
+            try:
+                conn.sendall(data)
+            except OSError:
+                dead.append(conn)
+        for conn in dead:
+            _odo_clients.remove(conn)
 
 
 def _socket_relay_loop(relay_queue, stop_event):
@@ -216,6 +261,12 @@ def main():
     socket_thread.start()
     logging.info(f"Relay socket pornit pe {RELAY_SOCKET}")
 
+    odo_thread = threading.Thread(
+        target=_odo_server_loop, args=(socket_stop,),
+        name="odo-server", daemon=True)
+    odo_thread.start()
+    logging.info(f"Odometry socket pornit pe {ODO_SOCKET}")
+
     try:
         while True:
             ser = connect_serial()
@@ -249,20 +300,8 @@ def main():
                     if not line:
                         continue
 
-                    # RPM → km/h + pace
                     if line.startswith("RPM:"):
-                        try:
-                            rpm = float(line[4:])
-                            if rpm > 0:
-                                kmh  = rpm * WHEEL_CIRCUMFERENCE_M * 60 / 1000
-                                pace_sec = 3600 / kmh
-                                pace_min = int(pace_sec // 60)
-                                pace_s   = int(pace_sec % 60)
-                                print(f"\r[ODO] {kmh:.2f} km/h  |  pace: {pace_min}:{pace_s:02d} /km   ", end="", flush=True)
-                            else:
-                                print(f"\r[ODO] 0.00 km/h  |  pace: --:--          ", end="", flush=True)
-                        except ValueError:
-                            pass
+                        _odo_broadcast(line)
                         continue
 
                     if "[WD]" not in line and "HB" not in line:

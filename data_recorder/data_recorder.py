@@ -460,13 +460,17 @@ def main():
     writer_thread.start()
 
     try:
-        _relay_cmd("RELAY_ON")
-        # --- I2C / PCA9685 --------------------------------------------------
+        # --- I2C / PCA9685 ----------------------------------------------------
         i2c = busio.I2C(board.SCL, board.SDA)
         pca = PCA9685(i2c)
         pca.frequency = PCA_FREQUENCY_HZ
 
         esc = ESC(pca)
+        esc.neutral()  # trimite semnal PWM valid ÎNAINTE de a alimenta ESC-ul -
+        # majoritatea ESC-urilor (inclusiv QuicRun 10BL120) asteapta semnal
+        # PWM valid din chiar clipa in care primesc curent; daca stau alimentate
+        # cateva secunde fara semnal, multe intra in failsafe si refuza sa
+        # armeze pana la un power-cycle complet.
         steering = SteeringServo(pca)
 
         # --- Controller: fail fast before we spend 3s arming the ESC --------
@@ -474,6 +478,9 @@ def main():
         if controller is None:
             raise ConnectionError("Controller-ul Xbox nu a fost gasit.")
         controller_fd = controller.fd
+
+        # --- Alimentam ESC-ul DOAR dupa ce semnalul de neutru e deja activ ---
+        _relay_cmd("RELAY_ON")
 
         # --- Arm the ESC (see module docstring for why this matters) --------
         esc.arm()

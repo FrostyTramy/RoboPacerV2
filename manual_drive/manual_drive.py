@@ -315,9 +315,29 @@ def main():
     # `finally` foloseste asta la calculul duratei chiar si daca pornirea
     # a picat devreme (ex: controller negasit, log de viteza nescriibil).
     run_start_time = time.time()
+    total_distance_m = 0.0
 
     try:
+        # PCA/ESC configurat SI semnal de neutru trimis inainte de a alimenta
+        # ESC-ul prin releu - la fel ca in data_recorder.py/main.py. ESC-urile
+        # asteapta semnal PWM valid din clipa in care primesc curent; daca stau
+        # alimentate cateva secunde fara semnal, multe intra in failsafe.
+        i2c = busio.I2C(board.SCL, board.SDA)
+        pca = PCA9685(i2c)
+        pca.frequency = PCA_FREQUENCY_HZ
+
+        esc = ESC(pca)
+        esc.neutral()
+        steering = SteeringServo(pca)
+
+        controller = find_xbox_controller()
+        if controller is None:
+            raise ConnectionError("Controller-ul Xbox nu a fost gasit.")
+        controller_fd = controller.fd
+
         _relay_cmd("RELAY_ON")
+
+        esc.arm()
 
         speed_log_path = os.path.join(
             SPEED_LOG_DIR, f"speed_{time.strftime('%Y%m%d_%H%M%S')}.csv")
@@ -331,20 +351,6 @@ def main():
             target=_odo_reader_loop, args=(odo_stop_event,), daemon=True)
         odo_thread.start()
 
-        i2c = busio.I2C(board.SCL, board.SDA)
-        pca = PCA9685(i2c)
-        pca.frequency = PCA_FREQUENCY_HZ
-
-        esc = ESC(pca)
-        steering = SteeringServo(pca)
-
-        controller = find_xbox_controller()
-        if controller is None:
-            raise ConnectionError("Controller-ul Xbox nu a fost gasit.")
-        controller_fd = controller.fd
-
-        esc.arm()
-
         print("\n-----------------------------------------------------")
         print("Masina e ACTIVA - raspunde la stick din prima clipa.")
         print("Apasa [Y] pentru PAUZA (servo+motor opresc, stick-ul e ignorat).")
@@ -357,6 +363,7 @@ def main():
         brake_value = 0
         is_paused = False
         last_speed_log_time = run_start_time
+        last_distance_time = run_start_time
 
         while True:
             ready, _, _ = select.select([controller_fd], [], [], 0.001)
@@ -400,6 +407,9 @@ def main():
             kmh = _rpm_to_kmh(rpm)
 
             now = time.time()
+            total_distance_m += (kmh / 3.6) * (now - last_distance_time)
+            last_distance_time = now
+
             if now - last_speed_log_time >= SPEED_LOG_INTERVAL_SECONDS:
                 last_speed_log_time = now
                 pace = _format_pace(kmh)
@@ -445,6 +455,12 @@ def main():
         if odo_thread is not None:
             odo_thread.join(timeout=2)
 
+        # Distanta = integrala vitezei (km/h -> m/s) pe durata fiecarui tick al
+        # buclei principale (vezi total_distance_m += ... mai sus) - nu vine
+        # direct de la ESP32, care trimite doar RPM instantaneu.
+        total_cm = round(total_distance_m * 100)
+        distance_m, distance_cm = divmod(total_cm, 100)
+
         if speed_log_file is not None:
             if speed_samples:
                 rpm_vals = [s[0] for s in speed_samples]
@@ -460,9 +476,13 @@ def main():
                     f"RPM   -> mediu {avg_rpm:.2f} | maxim {max_rpm:.2f}\n"
                     f"km/h  -> mediu {avg_kmh_moving:.2f} (cat timp s-a miscat) | maxim {max_kmh:.2f}\n"
                     f"Pace  -> mediu {_format_pace(avg_kmh_moving)}/km | cel mai bun {_format_pace(max_kmh)}/km\n"
+                    f"Distanta -> {distance_m} m {distance_cm} cm ({total_distance_m:.2f} m)\n"
                 )
             else:
-                summary = "\n--- SUMAR ---\nNiciun esantion inregistrat.\n"
+                summary = (
+                    "\n--- SUMAR ---\nNiciun esantion inregistrat.\n"
+                    f"Distanta -> {distance_m} m {distance_cm} cm ({total_distance_m:.2f} m)\n"
+                )
             speed_log_file.write(summary)
             speed_log_file.close()
             print(summary)

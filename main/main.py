@@ -409,7 +409,6 @@ def main():
     controller = None
 
     try:
-        _relay_cmd("RELAY_ON")
         hef_path = find_hef_path()
         print(f"[Hailo] Model: {os.path.basename(hef_path)}")
         hef = HEF(hef_path)
@@ -439,6 +438,9 @@ def main():
         pca.frequency = PCA_FREQUENCY_HZ
 
         esc = ESC(pca)
+        esc.neutral()  # semnal PWM valid inainte de alimentare - vezi comentariul
+        # din data_recorder.py: fara asta, ESC-ul primeste curent fara semnal
+        # timp de cateva secunde si multe ESC-uri intra in failsafe.
         steering = SteeringServo(pca)
 
         # --- Controller: fail fast before we spend 3s arming the ESC --------
@@ -446,6 +448,9 @@ def main():
         if controller is None:
             raise ConnectionError("Controller-ul Xbox nu a fost gasit.")
         controller_fd = controller.fd
+
+        # --- Alimentam ESC-ul DOAR dupa ce semnalul de neutru e deja activ ---
+        _relay_cmd("RELAY_ON")
 
         # --- Arm the ESC (see module docstring for why this matters) --------
         esc.arm()

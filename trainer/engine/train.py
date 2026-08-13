@@ -3,13 +3,17 @@ RoboPacerV2 Trainer - training + export module.
 Runs on Windows (or any machine with a GPU/CPU + Docker). Called by
 server.py, or standalone via `python train.py --json ... --name mycar`.
 
-Design goal: the .hef this produces must match, pixel-for-pixel, what
-RoboPacerV2/main/main.py feeds the model at inference time on the Pi. See
-load_and_preprocess() below - it must stay in lockstep with main.py's
-preprocess() function (same decode-to-RGB, same cv2.resize/INTER_LINEAR
-with no anti-aliasing, same normalize math). If you ever change one, change
-the other - a silent mismatch here doesn't error, it just quietly caps the
-model's real-world accuracy.
+Design goal: the .hef this produces must match, pixel-for-pixel, what feeds
+the model at inference time on the Pi. There are now two Pi-side scripts
+that run inference - RoboPacerV2/model_runner/model_runner.py (steering
+only) and RoboPacerV2/main/main.py (steering + cruise-control speed) - but
+main.py's preprocessing is a verbatim copy of model_runner.py's, so both
+stay in lockstep with load_and_preprocess() below automatically as long as
+that copy is kept exact (same decode-to-RGB, same cv2.resize/INTER_LINEAR
+with no anti-aliasing, same normalize math). If you ever change the
+preprocessing on either side, change it in load_and_preprocess() here AND
+in both Pi scripts - a silent mismatch here doesn't error, it just quietly
+caps the model's real-world accuracy.
 """
 import argparse
 import json

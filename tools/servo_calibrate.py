@@ -111,9 +111,9 @@ def esc_pulse_from_gas_brake(gas_value, brake_value):
 def steering_pulse_test(x_value, min_p, center_p, max_p):
     """Direct 3-point mapping using your exact marked values: stick
     centered -> exactly center_p, full deflection either way -> exactly
-    min_p/max_p. Deliberately NOT the same as data_recorder.py/main.py's
-    angle math (which clamps to a 45-135 deg safety margin and so never
-    actually reaches the physical endpoints you marked) - this is for
+    min_p/max_p. Deliberately NOT the same as data_recorder.py/model_runner.py/
+    main.py's angle math (which clamps to a 45-135 deg safety margin and so
+    never actually reaches the physical endpoints you marked) - this is for
     testing the calibration points themselves, full throw included."""
     raw = 1.0 - (x_value / AXIS_MAX) * 2.0  # 0..AXIS_MAX -> 1..-1
     if abs(raw) <= STEERING_DEADZONE:
@@ -296,7 +296,8 @@ def main():
         if min_p is not None and center_p is not None and max_p is not None and max_p > min_p:
             angle_at_center = (center_p - min_p) / (max_p - min_p) * 180
             offset = round(angle_at_center - 90)
-            print("Paste into data_recorder/data_recorder.py AND main/main.py (both must match):")
+            print("Paste into data_recorder/data_recorder.py, model_runner/model_runner.py, "
+                  "AND main/main.py (all three must match):")
             print(f"    SERVO_MIN_PULSE = {min_p}")
             print(f"    SERVO_MAX_PULSE = {max_p}")
             print(f"    SERVO_OFFSET = {offset}   # SERVO_NEUTRAL_ANGLE stays 90")

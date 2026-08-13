@@ -18,6 +18,7 @@ Porneste direct in stare ACTIVA (raspunde la stick din prima clipa, dupa
 armarea ESC-ului) - [A]/[Y] doar comuta intre activ si pauza.
 """
 
+import json
 import logging
 import os
 import select
@@ -83,7 +84,7 @@ LABEL_DEADZONE = 0.2
 # acelasi socket si aceeasi formula de conversie RPM -> km/h.
 # ---------------------------------------------------------------------------
 ODO_SOCKET = "/tmp/esp32_odometry.sock"
-WHEEL_CIRCUMFERENCE_M = 0.1257  # diametru 40mm -> pi x 0.04
+WHEEL_CIRCUMFERENCE_M = 0.1369  # diametru 43.58mm - calibrat cu ruleta pe 200m reali (calculase 195.30m cu 42.56mm)
 ODO_RECONNECT_SLEEP_SECONDS = 2.0
 SPEED_LOG_INTERVAL_SECONDS = 0.5
 
@@ -243,6 +244,131 @@ def _odo_reader_loop(stop_event):
                 stop_event.wait(ODO_RECONNECT_SLEEP_SECONDS)
 
 
+_CONTROL_SOCKET = "/tmp/manual_drive_control.sock"
+
+# Distanta traita separat de total_distance_m din main(): dashboard-ul web
+# afiseaza _distance_state["total_m"] - _distance_state["reset_offset_m"]
+# (ca un cronometru de trip), dar sumarul final de la sfarsitul rularii tot
+# raporteaza distanta totala neatinsa de reset-uri - vezi total_distance_m.
+_distance_state = {"total_m": 0.0, "reset_offset_m": 0.0}
+_distance_lock = threading.Lock()
+
+# Viteza/pauza curente, pentru afisajul live din pagina web (nu au nevoie
+# de reset - se actualizeaza pur si simplu la fiecare tick al buclei).
+_live_state = {"kmh": 0.0, "paused": False}
+_live_lock = threading.Lock()
+
+# Medie/maxim viteza de la ultimul reset - la fel ca in sumarul final,
+# media ia in calcul doar cat timp masina chiar s-a miscat (kmh > 0).
+_speed_stats_state = {"kmh_sum": 0.0, "kmh_count": 0, "max_kmh": 0.0}
+_speed_stats_lock = threading.Lock()
+
+
+def _update_distance(total_m):
+    with _distance_lock:
+        _distance_state["total_m"] = total_m
+
+
+def _get_display_distance_m():
+    with _distance_lock:
+        return _distance_state["total_m"] - _distance_state["reset_offset_m"]
+
+
+def _reset_display_distance():
+    with _distance_lock:
+        _distance_state["reset_offset_m"] = _distance_state["total_m"]
+
+
+def _update_live(kmh, paused):
+    with _live_lock:
+        _live_state["kmh"] = kmh
+        _live_state["paused"] = paused
+
+
+def _get_live_state():
+    with _live_lock:
+        return dict(_live_state)
+
+
+def _record_speed_sample(kmh):
+    with _speed_stats_lock:
+        if kmh > 0:
+            _speed_stats_state["kmh_sum"] += kmh
+            _speed_stats_state["kmh_count"] += 1
+        if kmh > _speed_stats_state["max_kmh"]:
+            _speed_stats_state["max_kmh"] = kmh
+
+
+def _get_speed_stats():
+    with _speed_stats_lock:
+        count = _speed_stats_state["kmh_count"]
+        avg_kmh = _speed_stats_state["kmh_sum"] / count if count else 0.0
+        return avg_kmh, _speed_stats_state["max_kmh"]
+
+
+def _reset_speed_stats():
+    with _speed_stats_lock:
+        _speed_stats_state["kmh_sum"] = 0.0
+        _speed_stats_state["kmh_count"] = 0
+        _speed_stats_state["max_kmh"] = 0.0
+
+
+def _control_server_loop(stop_event):
+    """Socket local pentru dashboard-ul web: STATUS intoarce distanta live
+    (afisata pe pagina scriptului), RESET_DISTANCE o pune la zero (doar
+    afisajul - sumarul final tot raporteaza distanta totala reala)."""
+    try:
+        os.unlink(_CONTROL_SOCKET)
+    except OSError:
+        pass
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(_CONTROL_SOCKET)
+    srv.listen(5)
+    srv.settimeout(1.0)
+    try:
+        while not stop_event.is_set():
+            try:
+                conn, _ = srv.accept()
+            except socket.timeout:
+                continue
+            with conn:
+                try:
+                    data = conn.recv(64).decode("utf-8", errors="replace").strip()
+                except OSError:
+                    continue
+                if data == "STATUS":
+                    live = _get_live_state()
+                    avg_kmh, max_kmh = _get_speed_stats()
+                    payload = {
+                        "distance_m": round(_get_display_distance_m(), 2),
+                        "kmh": round(live["kmh"], 2),
+                        "pace": _format_pace(live["kmh"]),
+                        "paused": live["paused"],
+                        "avg_kmh": round(avg_kmh, 2),
+                        "avg_pace": _format_pace(avg_kmh),
+                        "max_kmh": round(max_kmh, 2),
+                        "max_pace": _format_pace(max_kmh),
+                    }
+                    try:
+                        conn.sendall((json.dumps(payload) + "\n").encode())
+                    except OSError:
+                        pass
+                elif data == "RESET_DISTANCE":
+                    _reset_display_distance()
+                    _reset_speed_stats()
+                    try:
+                        conn.sendall(b'{"ok": true}\n')
+                    except OSError:
+                        pass
+    finally:
+        srv.close()
+        try:
+            os.unlink(_CONTROL_SOCKET)
+        except OSError:
+            pass
+
+
 def _rpm_to_kmh(rpm):
     return rpm * WHEEL_CIRCUMFERENCE_M * 60 / 1000
 
@@ -284,6 +410,8 @@ def main():
     last_rumble_effect_id = None
     odo_thread = None
     odo_stop_event = None
+    control_thread = None
+    control_stop_event = None
     speed_log_file = None
     speed_samples = []  # (rpm, kmh) la fiecare SPEED_LOG_INTERVAL_SECONDS
 
@@ -351,6 +479,11 @@ def main():
             target=_odo_reader_loop, args=(odo_stop_event,), daemon=True)
         odo_thread.start()
 
+        control_stop_event = threading.Event()
+        control_thread = threading.Thread(
+            target=_control_server_loop, args=(control_stop_event,), daemon=True)
+        control_thread.start()
+
         print("\n-----------------------------------------------------")
         print("Masina e ACTIVA - raspunde la stick din prima clipa.")
         print("Apasa [Y] pentru PAUZA (servo+motor opresc, stick-ul e ignorat).")
@@ -409,6 +542,9 @@ def main():
             now = time.time()
             total_distance_m += (kmh / 3.6) * (now - last_distance_time)
             last_distance_time = now
+            _update_distance(total_distance_m)
+            _update_live(kmh, is_paused)
+            _record_speed_sample(kmh)
 
             if now - last_speed_log_time >= SPEED_LOG_INTERVAL_SECONDS:
                 last_speed_log_time = now
@@ -433,6 +569,15 @@ def main():
         logging.exception("Eroare majora neasteptata")
         print(f"\nEroare majora neasteptata: {e}")
     finally:
+        # Ignoram SIGTERM-uri ulterioare din acest punct incolo. RELAY_OFF
+        # de mai jos face ESP32-ul sa emita !!ESTOP!! (trateaza orice
+        # oprire de releu la fel, indiferent de cauza), care ne mai trimite
+        # un SIGTERM noua - fara asta, al doilea semnal ridica un nou
+        # KeyboardInterrupt chiar in mijlocul lui `finally`, fara alt
+        # try/except in jur, si Python abandoneaza curatarea pe loc
+        # (ESC/servo pot ramane neoprite, sumarul nu se mai scrie).
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+
         _relay_cmd("RELAY_OFF")
         if esc is not None:
             esc.neutral()
@@ -455,39 +600,46 @@ def main():
         if odo_thread is not None:
             odo_thread.join(timeout=2)
 
+        if control_stop_event is not None:
+            control_stop_event.set()
+        if control_thread is not None:
+            control_thread.join(timeout=2)
+
         # Distanta = integrala vitezei (km/h -> m/s) pe durata fiecarui tick al
         # buclei principale (vezi total_distance_m += ... mai sus) - nu vine
         # direct de la ESP32, care trimite doar RPM instantaneu.
         total_cm = round(total_distance_m * 100)
         distance_m, distance_cm = divmod(total_cm, 100)
+        distance_line = (
+            f"Distanta -> {distance_m} m {distance_cm} cm "
+            f"({total_distance_m / 1000:.3f} km)\n"
+        )
+
+        if speed_samples:
+            rpm_vals = [s[0] for s in speed_samples]
+            kmh_vals = [s[1] for s in speed_samples]
+            moving_kmh_vals = [k for k in kmh_vals if k > 0]
+            avg_rpm = sum(rpm_vals) / len(rpm_vals)
+            max_rpm = max(rpm_vals)
+            avg_kmh_moving = sum(moving_kmh_vals) / len(moving_kmh_vals) if moving_kmh_vals else 0.0
+            max_kmh = max(kmh_vals)
+            summary = (
+                "\n--- SUMAR ---\n"
+                f"Durata: {time.time() - run_start_time:.1f}s | {len(speed_samples)} esantioane (la {SPEED_LOG_INTERVAL_SECONDS}s)\n"
+                f"RPM   -> mediu {avg_rpm:.2f} | maxim {max_rpm:.2f}\n"
+                f"km/h  -> mediu {avg_kmh_moving:.2f} (cat timp s-a miscat) | maxim {max_kmh:.2f}\n"
+                f"Pace  -> mediu {_format_pace(avg_kmh_moving)}/km | cel mai bun {_format_pace(max_kmh)}/km\n"
+                f"{distance_line}"
+            )
+        else:
+            summary = f"\n--- SUMAR ---\nNiciun esantion inregistrat.\n{distance_line}"
 
         if speed_log_file is not None:
-            if speed_samples:
-                rpm_vals = [s[0] for s in speed_samples]
-                kmh_vals = [s[1] for s in speed_samples]
-                moving_kmh_vals = [k for k in kmh_vals if k > 0]
-                avg_rpm = sum(rpm_vals) / len(rpm_vals)
-                max_rpm = max(rpm_vals)
-                avg_kmh_moving = sum(moving_kmh_vals) / len(moving_kmh_vals) if moving_kmh_vals else 0.0
-                max_kmh = max(kmh_vals)
-                summary = (
-                    "\n--- SUMAR ---\n"
-                    f"Durata: {time.time() - run_start_time:.1f}s | {len(speed_samples)} esantioane (la {SPEED_LOG_INTERVAL_SECONDS}s)\n"
-                    f"RPM   -> mediu {avg_rpm:.2f} | maxim {max_rpm:.2f}\n"
-                    f"km/h  -> mediu {avg_kmh_moving:.2f} (cat timp s-a miscat) | maxim {max_kmh:.2f}\n"
-                    f"Pace  -> mediu {_format_pace(avg_kmh_moving)}/km | cel mai bun {_format_pace(max_kmh)}/km\n"
-                    f"Distanta -> {distance_m} m {distance_cm} cm ({total_distance_m:.2f} m)\n"
-                )
-            else:
-                summary = (
-                    "\n--- SUMAR ---\nNiciun esantion inregistrat.\n"
-                    f"Distanta -> {distance_m} m {distance_cm} cm ({total_distance_m:.2f} m)\n"
-                )
             speed_log_file.write(summary)
             speed_log_file.close()
             print(summary)
 
-        logging.info("Manual drive stopped")
+        logging.info("Manual drive stopped\n" + summary)
         print("\nHardware oprit si curatat. Program inchis.")
 
 

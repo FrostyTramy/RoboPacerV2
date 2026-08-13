@@ -8,6 +8,7 @@ status trebuie sa ramana utila chiar daca o singura sursa de date lipseste
 """
 
 import json
+import os
 import queue
 import re
 import socket
@@ -16,6 +17,8 @@ import threading
 import time
 
 RELAY_SOCKET = "/tmp/esp32_relay.sock"
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MAIN_MODEL_DIR = os.path.join(PROJECT_ROOT, "main")
 
 _JOYSTICK_NAME_HINTS = ("xbox", "shanwan", "gamepad", "joystick", "controller")
 
@@ -134,6 +137,86 @@ def get_esp32_status():
             "last_esp32_line": None,
             "age_seconds": None,
         }
+
+
+MANUAL_DRIVE_SOCKET = "/tmp/manual_drive_control.sock"
+
+
+def get_manual_drive_status():
+    """Interogheaza socket-ul de control al manual_drive.py (exista doar
+    cat timp scriptul chiar ruleaza) - distanta/viteza live pentru pagina
+    lui din dashboard."""
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(1.0)
+            s.connect(MANUAL_DRIVE_SOCKET)
+            s.sendall(b"STATUS\n")
+            raw = s.recv(1024).decode("utf-8", errors="replace").strip()
+        return json.loads(raw)
+    except (OSError, socket.timeout, json.JSONDecodeError):
+        return None
+
+
+def reset_manual_drive_distance():
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(1.0)
+            s.connect(MANUAL_DRIVE_SOCKET)
+            s.sendall(b"RESET_DISTANCE\n")
+            s.recv(1024)
+        return True
+    except (OSError, socket.timeout):
+        return False
+
+
+CRUISE_CONTROL_SOCKET = "/tmp/cruise_control_control.sock"
+
+
+def get_cruise_control_status():
+    """Interogheaza socket-ul de control al cruise_control.py (exista doar
+    cat timp scriptul chiar ruleaza) - tinta/viteza live pentru pagina lui
+    din dashboard."""
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(1.0)
+            s.connect(CRUISE_CONTROL_SOCKET)
+            s.sendall(b"STATUS\n")
+            raw = s.recv(1024).decode("utf-8", errors="replace").strip()
+        return json.loads(raw)
+    except (OSError, socket.timeout, json.JSONDecodeError):
+        return None
+
+
+MAIN_CONTROL_SOCKET = "/tmp/main_autopilot_control.sock"
+
+
+def get_main_model_info():
+    """Lista .hef din main/ (mirror-uieste regula "exact unul" din
+    main/main.py:find_hef_path()) - ca pagina web sa poata arata/bloca
+    Start-ul FARA sa astepte ca scriptul sa fi pornit."""
+    try:
+        hefs = [f for f in os.listdir(MAIN_MODEL_DIR) if f.endswith(".hef")]
+    except OSError as e:
+        return {"ok": False, "error": f"Nu pot citi {MAIN_MODEL_DIR}: {e}"}
+    if len(hefs) == 0:
+        return {"ok": False, "error": f"Niciun fisier .hef in {MAIN_MODEL_DIR}."}
+    if len(hefs) > 1:
+        return {"ok": False, "error": f"Mai multe fisiere .hef in {MAIN_MODEL_DIR}: {hefs}."}
+    return {"ok": True, "model_name": hefs[0]}
+
+
+def get_main_status():
+    """Interogheaza socket-ul de control al main/main.py (exista doar cat
+    timp scriptul chiar ruleaza) - tinta/viteza/distanta live."""
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(1.0)
+            s.connect(MAIN_CONTROL_SOCKET)
+            s.sendall(b"STATUS\n")
+            raw = s.recv(1024).decode("utf-8", errors="replace").strip()
+        return json.loads(raw)
+    except (OSError, socket.timeout, json.JSONDecodeError):
+        return None
 
 
 def get_all_stats():

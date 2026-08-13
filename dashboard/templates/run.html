@@ -21,13 +21,65 @@
     </div>
     {% endif %}
 
+    {% if script.id == "main" %}
+    <div class="grid" id="main-model-box">
+        <div class="card"><div class="label">Model activ</div><div class="value" id="mn-model-name">--</div></div>
+    </div>
+
+    <div class="field-group" id="main-config-box">
+        <label class="field-label">Viteza tinta
+            <div class="unit-row">
+                <input type="text" class="field-input" id="mn-speed-input" placeholder="10.0" inputmode="decimal">
+                <button type="button" class="btn-small" id="mn-speed-unit-btn" onclick="toggleSpeedUnit()">km/h</button>
+            </div>
+        </label>
+        <label class="field-label">Distanta tinta (m)
+            <input type="number" class="field-input" id="mn-distance-input" min="1" max="50000" step="1" placeholder="500" inputmode="numeric">
+        </label>
+        <div class="error-text" id="mn-config-error"></div>
+    </div>
+    {% endif %}
+
     <div class="controls">
         <span class="badge" id="status-badge">--</span>
         <button class="btn-start" id="btn-start" onclick="start(false)">Start</button>
         <button class="btn-stop" id="btn-stop" onclick="stop()" style="display:none">Stop</button>
     </div>
 
-    <div id="console"></div>
+    {% if script.id == "main" %}
+    <div class="grid" id="main-telemetry-box">
+        <div class="card"><div class="label">Tinta</div><div class="value" id="mn-target">--</div></div>
+        <div class="card"><div class="label">Viteza curenta</div><div class="value" id="mn-kmh">--</div></div>
+        <div class="card"><div class="label">Pace</div><div class="value" id="mn-pace">--</div></div>
+        <div class="card"><div class="label">Distanta</div><div class="value" id="mn-distance">--</div></div>
+        <div class="card"><div class="label">Stare</div><div class="value" id="mn-engaged">--</div></div>
+    </div>
+    {% endif %}
+
+    {% if script.id == "manual_drive" %}
+    <div class="grid" id="telemetry-box">
+        <div class="card"><div class="label">Distanta</div><div class="value" id="tel-distance">--</div></div>
+        <div class="card"><div class="label">Viteza</div><div class="value" id="tel-kmh">--</div></div>
+        <div class="card"><div class="label">Pace</div><div class="value" id="tel-pace">--</div></div>
+        <div class="card"><div class="label">Viteza medie</div><div class="value" id="tel-avg-kmh">--</div></div>
+        <div class="card"><div class="label">Viteza maxima</div><div class="value" id="tel-max-kmh">--</div></div>
+    </div>
+    <button class="btn-small" id="btn-reset-distance" onclick="resetDistance()" style="margin-bottom:16px">Reset distanta</button>
+    {% endif %}
+
+    {% if script.id == "cruise_control" %}
+    <div class="grid" id="cruise-telemetry-box">
+        <div class="card"><div class="label">Tinta</div><div class="value" id="cc-target">--</div></div>
+        <div class="card"><div class="label">Viteza curenta</div><div class="value" id="cc-kmh">--</div></div>
+        <div class="card"><div class="label">Pace</div><div class="value" id="cc-pace">--</div></div>
+        <div class="card"><div class="label">Stare</div><div class="value" id="cc-engaged">--</div></div>
+    </div>
+    {% endif %}
+
+    <div class="console-wrap" id="console-wrap">
+        <button class="btn-small" id="btn-toggle-console" onclick="toggleConsole()" style="display:none">Arata logurile</button>
+        <div id="console"></div>
+    </div>
 
     <div class="modal-backdrop" id="conflict-modal">
         <div class="modal">
@@ -51,19 +103,104 @@
             return Array.from(document.querySelectorAll(".flag-checkbox:checked")).map(c => c.value);
         }
 
+        // Viteza tinta a lui "main" se poate introduce fie in km/h, fie ca
+        // pace (mm:ss/km, cum gandeste un alergator) - acelasi camp text,
+        // doar unitatea afisata se schimba. Conversie: pace_sec = 3600/kmh
+        // (identic cu _format_pace din scripturile Python).
+        let speedUnitIsPace = false;
+
+        function kmhFromPaceStr(s) {
+            const m = /^(\d+):([0-5]?\d)(?:[.,]\d+)?$/.exec(s.trim());
+            if (!m) return null;
+            const paceSec = parseInt(m[1], 10) * 60 + parseInt(m[2], 10);
+            return paceSec > 0 ? 3600 / paceSec : null;
+        }
+
+        function paceStrFromKmh(kmh) {
+            if (!(kmh > 0)) return "";
+            const paceSec = Math.round(3600 / kmh);
+            const mm = Math.floor(paceSec / 60);
+            const ss = paceSec % 60;
+            return mm + ":" + String(ss).padStart(2, "0");
+        }
+
+        function toggleSpeedUnit() {
+            const input = document.getElementById("mn-speed-input");
+            const btn = document.getElementById("mn-speed-unit-btn");
+            const raw = input.value.trim();
+            if (!speedUnitIsPace) {
+                const kmh = parseFloat(raw.replace(",", "."));
+                speedUnitIsPace = true;
+                btn.textContent = "min/km";
+                input.placeholder = "6:00";
+                if (!isNaN(kmh) && kmh > 0) input.value = paceStrFromKmh(kmh);
+            } else {
+                const kmh = kmhFromPaceStr(raw);
+                speedUnitIsPace = false;
+                btn.textContent = "km/h";
+                input.placeholder = "10.0";
+                if (kmh != null) input.value = kmh.toFixed(1);
+            }
+        }
+
+        function targetKmhFromInput() {
+            const raw = document.getElementById("mn-speed-input").value.trim();
+            if (speedUnitIsPace) return kmhFromPaceStr(raw);
+            const v = parseFloat(raw.replace(",", "."));
+            return isNaN(v) ? null : v;
+        }
+
+        function loadMainModelInfo() {
+            fetch("/api/main/model_info").then(r => r.json()).then(data => {
+                const el = document.getElementById("mn-model-name");
+                const startBtn = document.getElementById("btn-start");
+                if (data.ok) {
+                    el.textContent = data.model_name;
+                    el.classList.remove("bad-value");
+                } else {
+                    el.textContent = data.error || "eroare necunoscuta";
+                    el.classList.add("bad-value");
+                    if (startBtn) startBtn.disabled = true;
+                }
+            }).catch(() => { document.getElementById("mn-model-name").textContent = "eroare la citire"; });
+        }
+
+        function validateMainConfig() {
+            const errEl = document.getElementById("mn-config-error");
+            const kmh = targetKmhFromInput();
+            const dist = parseFloat(document.getElementById("mn-distance-input").value);
+            if (kmh == null || !(kmh > 0) || kmh > 100) {
+                errEl.textContent = "Viteza tinta invalida (0.1-100 km/h, sau pace valid ex. 6:00).";
+                return null;
+            }
+            if (isNaN(dist) || dist < 1 || dist > 50000) {
+                errEl.textContent = "Distanta tinta invalida (1-50000 m).";
+                return null;
+            }
+            errEl.textContent = "";
+            return {target_kmh: kmh, distance_m: dist};
+        }
+
         function start(force) {
+            const body = {id: scriptId, force: force, args: selectedArgs()};
+            if (scriptId === "main") {
+                const params = validateMainConfig();
+                if (!params) return;
+                body.params = params;
+            }
             fetch("/api/start", {
                 method: "POST",
                 headers: {"Content-Type": "application/json"},
-                body: JSON.stringify({id: scriptId, force: force, args: selectedArgs()}),
+                body: JSON.stringify(body),
             }).then(async r => {
                 closeModal();
                 if (r.status === 409) {
-                    const body = await r.json();
+                    const respBody = await r.json();
                     document.getElementById("conflict-text").textContent =
-                        "Ruleaza deja '" + body.running.id + "'. Il opresti si pornesti '" + scriptId + "'?";
+                        "Ruleaza deja '" + respBody.running.id + "'. Il opresti si pornesti '" + scriptId + "'?";
                     document.getElementById("conflict-modal").classList.add("open");
                 } else if (r.ok) {
+                    logLines = [];
                     consoleEl.textContent = "";
                     openLogStream();
                 }
@@ -72,6 +209,95 @@
 
         function stop() {
             fetch("/api/stop", {method: "POST"});
+        }
+
+        // Telemetrie live (distanta/viteza/pace) - doar pentru manual_drive,
+        // interogheaza socket-ul de control al scriptului via dashboard.
+        let telemetryTimer = null;
+        function pollTelemetry() {
+            fetch("/api/manual_drive/status").then(r => r.json()).then(data => {
+                document.getElementById("tel-distance").textContent =
+                    data.distance_m == null ? "--" : data.distance_m.toFixed(2) + " m";
+                document.getElementById("tel-kmh").textContent =
+                    data.kmh == null ? "--" : data.kmh.toFixed(2) + " km/h" + (data.paused ? " (pauza)" : "");
+                document.getElementById("tel-pace").textContent = data.pace || "--";
+                document.getElementById("tel-avg-kmh").textContent =
+                    data.avg_kmh == null ? "--" : data.avg_kmh.toFixed(2) + " km/h / " + (data.avg_pace || "--") + " /km";
+                document.getElementById("tel-max-kmh").textContent =
+                    data.max_kmh == null ? "--" : data.max_kmh.toFixed(2) + " km/h / " + (data.max_pace || "--") + " /km";
+            }).catch(() => {});
+        }
+        function startTelemetryPolling() {
+            if (telemetryTimer) return;
+            pollTelemetry();
+            telemetryTimer = setInterval(pollTelemetry, 1000);
+        }
+        function stopTelemetryPolling() {
+            if (telemetryTimer) { clearInterval(telemetryTimer); telemetryTimer = null; }
+        }
+        function resetDistance() {
+            fetch("/api/manual_drive/reset_distance", {method: "POST"});
+        }
+
+        // La fel, pentru cruise_control - tinta se schimba doar din D-pad-ul
+        // controller-ului, pagina web doar afiseaza.
+        let cruiseTelemetryTimer = null;
+        function pollCruiseTelemetry() {
+            fetch("/api/cruise_control/status").then(r => r.json()).then(data => {
+                document.getElementById("cc-target").textContent =
+                    data.target_kmh == null ? "--" : data.target_kmh.toFixed(1) + " km/h";
+                document.getElementById("cc-kmh").textContent =
+                    data.kmh == null ? "--" : data.kmh.toFixed(2) + " km/h";
+                document.getElementById("cc-pace").textContent = data.pace || "--";
+                document.getElementById("cc-engaged").textContent =
+                    data.engaged == null ? "--" : (data.engaged ? "CRUISE activ" : "gata");
+            }).catch(() => {});
+        }
+        function startCruiseTelemetryPolling() {
+            if (cruiseTelemetryTimer) return;
+            pollCruiseTelemetry();
+            cruiseTelemetryTimer = setInterval(pollCruiseTelemetry, 1000);
+        }
+        function stopCruiseTelemetryPolling() {
+            if (cruiseTelemetryTimer) { clearInterval(cruiseTelemetryTimer); cruiseTelemetryTimer = null; }
+        }
+
+        // La fel, pentru "main" (autopilot) - tinta/distanta se seteaza o
+        // singura data la Start (din formular), pagina doar afiseaza cat a
+        // mai ramas din cursa.
+        let mainTelemetryTimer = null;
+        function pollMainTelemetry() {
+            fetch("/api/main/status").then(r => r.json()).then(data => {
+                document.getElementById("mn-target").textContent =
+                    data.target_kmh == null ? "--" : data.target_kmh.toFixed(1) + " km/h";
+                document.getElementById("mn-kmh").textContent =
+                    data.kmh == null ? "--" : data.kmh.toFixed(2) + " km/h";
+                document.getElementById("mn-pace").textContent = data.pace || "--";
+                document.getElementById("mn-distance").textContent =
+                    (data.distance_m == null || data.distance_target_m == null) ? "--" :
+                    data.distance_m.toFixed(0) + " / " + data.distance_target_m.toFixed(0) + " m";
+                document.getElementById("mn-engaged").textContent =
+                    data.engaged == null ? "--" : (data.engaged ? "PORNIT" : "asteapta [A]");
+            }).catch(() => {});
+        }
+        function startMainTelemetryPolling() {
+            if (mainTelemetryTimer) return;
+            pollMainTelemetry();
+            mainTelemetryTimer = setInterval(pollMainTelemetry, 1000);
+        }
+        function stopMainTelemetryPolling() {
+            if (mainTelemetryTimer) { clearInterval(mainTelemetryTimer); mainTelemetryTimer = null; }
+        }
+
+        // Consola pentru "main" porneste ascunsa (rulare lunga, log detaliat
+        // e in fisierul CSV, nu in consola) - un buton-ochi o extinde la
+        // cerere, aratand ultimele 50 de linii ca oriunde altundeva. Doar
+        // pentru scriptul asta - celelalte pagini raman neschimbate.
+        function toggleConsole() {
+            const wrap = document.getElementById("console-wrap");
+            const btn = document.getElementById("btn-toggle-console");
+            const collapsed = wrap.classList.toggle("collapsed");
+            btn.textContent = collapsed ? "Arata logurile" : "Ascunde logurile";
         }
 
         function applyStatus(payload) {
@@ -108,27 +334,50 @@
             statusSrc.onmessage = (e) => applyStatus(JSON.parse(e.data));
         }
 
+        // Maxim 50 de linii afisate - fara asta, o rulare lunga acumuleaza
+        // un DOM tot mai mare in #console si ajunge sa inghete pagina.
+        const MAX_CONSOLE_LINES = 50;
+        let logLines = [];
+
         let logSrc = null;
         function openLogStream() {
             if (logSrc) logSrc.close();
             logSrc = new EventSource("/api/stream/log/" + scriptId);
             logSrc.onmessage = (e) => {
                 const atBottom = consoleEl.scrollTop + consoleEl.clientHeight >= consoleEl.scrollHeight - 20;
-                consoleEl.textContent += e.data + "\n";
+                logLines.push(e.data);
+                if (logLines.length > MAX_CONSOLE_LINES) {
+                    logLines = logLines.slice(-MAX_CONSOLE_LINES);
+                }
+                consoleEl.textContent = logLines.join("\n") + "\n";
                 if (atBottom) consoleEl.scrollTop = consoleEl.scrollHeight;
             };
         }
 
         openStatusStream();
         openLogStream();
+        if (scriptId === "manual_drive") startTelemetryPolling();
+        if (scriptId === "cruise_control") startCruiseTelemetryPolling();
+        if (scriptId === "main") {
+            loadMainModelInfo();
+            startMainTelemetryPolling();
+            document.getElementById("console-wrap").classList.add("collapsed");
+            document.getElementById("btn-toggle-console").style.display = "inline-block";
+        }
 
         document.addEventListener("visibilitychange", () => {
             if (document.hidden) {
                 if (statusSrc) { statusSrc.close(); statusSrc = null; }
                 if (logSrc) { logSrc.close(); logSrc = null; }
+                stopTelemetryPolling();
+                stopCruiseTelemetryPolling();
+                stopMainTelemetryPolling();
             } else {
                 openStatusStream();
                 openLogStream();
+                if (scriptId === "manual_drive") startTelemetryPolling();
+                if (scriptId === "cruise_control") startCruiseTelemetryPolling();
+                if (scriptId === "main") startMainTelemetryPolling();
             }
         });
     </script>

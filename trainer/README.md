@@ -3,7 +3,10 @@
 Runs on Windows (or any machine with a GPU/CPU + Docker Desktop) - trains
 the steering model on a dataset collected by `data_recorder/data_recorder.py`
 on the Pi, then compiles it to a `.hef` for the Hailo-8 via Docker.
-`main/main.py` on the Pi runs the resulting `.hef`.
+`model_runner/model_runner.py` (steering-only) or `main/main.py` (steering +
+cruise-control speed) on the Pi run the resulting `.hef` - both run the
+exact same inference/preprocessing code, just drop the `.hef` next to
+whichever one you're using.
 
 ## Setup
 
@@ -28,8 +31,9 @@ model name / epochs / batch size, click Start. Training runs natively
 `hailo-dfc` Docker container. Output lands in `models/<name>.hef` (plus
 `.pth` checkpoint).
 
-Copy the `.hef` onto the Pi, into `main/`, next to `main.py` (exactly one
-`.hef` file must be in that folder).
+Copy the `.hef` onto the Pi, into `main/` (next to `main.py`) and/or
+`model_runner/` (next to `model_runner.py`) - exactly one `.hef` file must
+be in whichever folder you're running from.
 
 Training checks Docker + the DFC wheel are in place *before* starting -
 not after - so a missing wheel or a stopped Docker Desktop fails in a
@@ -64,8 +68,8 @@ straight from the existing `.onnx` and calibration data.
   temporal memory, but a smaller/simpler network and no dependency on
   recording fps being reasonably steady.
 
-You don't need to tell the trainer or `main.py` which one you used -
-they both detect it automatically:
+You don't need to tell the trainer or the Pi-side scripts which one you
+used - they all detect it automatically:
 
 - `engine/train.py` checks whether the dataset's records have a
   `timestamp` field and picks single-frame vs frame-stacked training
@@ -73,10 +77,11 @@ they both detect it automatically:
   calibration data to match). A dataset that mixes both formats (e.g.
   from concatenating two recording sessions made with different flags)
   fails fast with a clear error instead of training on ambiguous data.
-- `main/main.py` reads the compiled `.hef`'s own input shape at startup
-  and infers the same thing from its channel count (3 = classic, 9 = the
-  default 3-frame stack) - so whichever `.hef` you drop into `main/`,
-  next to `main.py`, it drives the car correctly either way.
+- `model_runner/model_runner.py` and `main/main.py` both read the
+  compiled `.hef`'s own input shape at startup and infer the same thing
+  from its channel count (3 = classic, 9 = the default 3-frame stack) -
+  so whichever `.hef` you drop next to either script, it drives the car
+  correctly either way.
 
 If a `driving_log.json` already exists, `data_recorder.py` keeps
 recording in whatever format is already in that file (ignoring
@@ -108,8 +113,9 @@ by the straight-driving majority.
 
 `engine/train.py`'s `load_and_preprocess()` / `SteeringDataset` intentionally
 use `cv2.resize(..., INTER_LINEAR)` and manual normalization instead of
-`torchvision.transforms`, because that's exactly what `main/main.py` does
-on the Pi at inference time. If these ever drift apart, the model sees
+`torchvision.transforms`, because that's exactly what the Pi-side scripts
+(`model_runner/model_runner.py`, `main/main.py`) do at inference time. If
+these ever drift apart, the model sees
 different pixel values during training than during real driving - a bug
 that doesn't throw an error, it just quietly caps accuracy. If you change
 one side, change the other.

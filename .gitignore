@@ -21,6 +21,8 @@ trainer/engine/compile/resources/
 set*/
 Pista-biciclete/
 manual_drive/speed_logs/
+cruise_control/logs/
+main/logs/
 
 # Garmin ConnectIQ app (build artifacts + source — nu merge pe github)
 Esp32/ConnectIQ/

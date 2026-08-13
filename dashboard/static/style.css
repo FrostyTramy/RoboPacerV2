@@ -136,3 +136,40 @@ button {
     max-width: 320px;
 }
 .modal .actions { display: flex; gap: 10px; margin-top: 16px; justify-content: flex-end; }
+
+.field-group {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px;
+    margin-top: 4px;
+}
+.field-label {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 0.8rem;
+    color: var(--muted);
+    text-transform: uppercase;
+}
+.field-input {
+    font-size: 1rem;
+    padding: 10px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text);
+    width: 100%;
+}
+.unit-row { display: flex; gap: 8px; }
+.unit-row .field-input { flex: 1; }
+.error-text { color: var(--bad); font-size: 0.85rem; min-height: 1.1em; }
+.value.bad-value { color: var(--bad); font-size: 0.95rem; }
+
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.console-wrap #console { display: block; }
+.console-wrap.collapsed #console { display: none; }

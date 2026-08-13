@@ -308,9 +308,10 @@ def _writer_loop(write_queue, driving_log, frames_dir, legacy_format):
     legacy_format=True omits "timestamp" from each record (classic format:
     just image_path + steering_angle). The trainer (trainer/engine/train.py)
     detects which format a dataset is by whether "timestamp" is present, and
-    picks single-frame vs frame-stacked training accordingly - main.py does
-    the equivalent detection at inference time from the compiled model's own
-    input shape. See --legacy's help text below for why you'd choose either."""
+    picks single-frame vs frame-stacked training accordingly - model_runner.py
+    and main.py do the equivalent detection at inference time from the
+    compiled model's own input shape. See --legacy's help text below for
+    why you'd choose either."""
     while True:
         item = write_queue.get()
         if item is None:  # sentinel - drain requested, stop
@@ -619,6 +620,15 @@ def main():
         logging.exception("Eroare majora neasteptata")
         print(f"\nEroare majora neasteptata: {e}")
     finally:
+        # Ignore further SIGTERMs from here on. RELAY_OFF below makes the
+        # ESP32 emit !!ESTOP!! (it treats every relay-off the same,
+        # regardless of cause), which sends us another SIGTERM - without
+        # this, that second signal raises a fresh KeyboardInterrupt right
+        # in the middle of `finally`, with no enclosing try/except, and
+        # Python abandons cleanup on the spot (ESC/servo can be left
+        # running, queued frames never get saved).
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+
         _relay_cmd("RELAY_OFF")
         # Motor to neutral first, before anything that can take a while
         # (like draining a backlog of queued disk writes) - stopping the

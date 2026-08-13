@@ -25,6 +25,7 @@ logica aici.
 
 import json
 import logging
+import math
 import os
 import subprocess
 import sys
@@ -176,6 +177,7 @@ def api_start():
     script_id = data.get("id")
     force = bool(data.get("force"))
     requested_args = data.get("args") or []
+    requested_params = data.get("params") or {}
 
     scripts = load_scripts()
     script = find_script(script_id, scripts)
@@ -190,6 +192,34 @@ def api_start():
     unknown = [a for a in requested_args if a not in allowed_flags]
     if unknown:
         return jsonify({"error": "unknown_flag", "flags": unknown}), 400
+
+    # Acelasi principiu pentru parametri numerici (ex: viteza/distanta
+    # tinta ale main.py) - doar cei declarati in scripts.json sunt
+    # acceptati, fiecare validat (tip numeric, nu NaN/infinit, in [min,max])
+    # si reconstruit server-side ca argv - niciodata nu trecem string-ul
+    # clientului direct mai departe.
+    declared_params = script.get("params", [])
+    param_args = []
+    if declared_params:
+        if not isinstance(requested_params, dict):
+            return jsonify({"error": "invalid_params"}), 400
+        declared_names = {p["name"] for p in declared_params}
+        unknown_params = [k for k in requested_params if k not in declared_names]
+        if unknown_params:
+            return jsonify({"error": "unknown_param", "params": unknown_params}), 400
+        for p in declared_params:
+            if p["name"] not in requested_params:
+                return jsonify({"error": "missing_param", "name": p["name"]}), 400
+            value = requested_params[p["name"]]
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                return jsonify({"error": "invalid_param", "name": p["name"]}), 400
+            value = float(value)
+            if value < p.get("min", float("-inf")) or value > p.get("max", float("inf")):
+                return jsonify({
+                    "error": "param_out_of_range", "name": p["name"],
+                    "min": p.get("min"), "max": p.get("max"),
+                }), 400
+            param_args.extend([p["flag"], str(value)])
 
     current = _status_payload()
     if current is not None:
@@ -206,7 +236,7 @@ def api_start():
     log_file = open(log_path_for(script_id), "wb", buffering=0)
     try:
         popen = subprocess.Popen(
-            ["python3", "-u", script["path"], *requested_args],
+            ["python3", "-u", script["path"], *requested_args, *param_args],
             stdout=log_file, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
             cwd=os.path.dirname(script["path"]),
             start_new_session=True,
@@ -232,6 +262,41 @@ def api_stop():
     return jsonify({"ok": True, "running": None})
 
 
+@app.route("/api/manual_drive/status")
+def api_manual_drive_status():
+    status = system_stats.get_manual_drive_status()
+    return jsonify(status or {
+        "distance_m": None, "kmh": None, "pace": None, "paused": None,
+        "avg_kmh": None, "avg_pace": None, "max_kmh": None, "max_pace": None,
+    })
+
+
+@app.route("/api/manual_drive/reset_distance", methods=["POST"])
+def api_manual_drive_reset_distance():
+    return jsonify({"ok": system_stats.reset_manual_drive_distance()})
+
+
+@app.route("/api/cruise_control/status")
+def api_cruise_control_status():
+    status = system_stats.get_cruise_control_status()
+    return jsonify(status or {"target_kmh": None, "kmh": None, "pace": None, "engaged": None})
+
+
+@app.route("/api/main/model_info")
+def api_main_model_info():
+    return jsonify(system_stats.get_main_model_info())
+
+
+@app.route("/api/main/status")
+def api_main_status():
+    status = system_stats.get_main_status()
+    return jsonify(status or {
+        "target_kmh": None, "kmh": None, "pace": None, "engaged": None,
+        "distance_m": None, "distance_target_m": None,
+        "last_split_m": None, "last_split_pace": None, "model_name": None,
+    })
+
+
 @app.route("/api/stream/log/<script_id>")
 def stream_log(script_id):
     path = log_path_for(script_id)
@@ -245,8 +310,10 @@ def stream_log(script_id):
             yield "data: [inca nu exista log - scriptul nu a fost pornit]\n\n"
             return
         with open(path, "r", errors="replace") as f:
-            for line in f.read().splitlines():
-                yield f"data: {line}\n\n"
+            # Nu redam istoricul fisierului la conectare - doar linii scrise
+            # DUPA acest moment. Fara asta, orice refresh de pagina reincarca
+            # tot log-ul vechi de la rularea anterioara in consola.
+            f.seek(0, os.SEEK_END)
             while True:
                 line = f.readline()
                 if line:

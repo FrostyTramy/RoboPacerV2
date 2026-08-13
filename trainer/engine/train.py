@@ -536,7 +536,7 @@ def run(config, push=None, should_stop=None):
         push({"type": "log", "level": "error", "text": f"Not found: {json_path}"})
         return
 
-    if not check_compile_prereqs(push):
+    if not config.get("pth_only") and not check_compile_prereqs(push):
         push({"type": "log", "level": "error",
               "text": "Fix the above before starting - training can take hours and "
                       "the HEF compile step needs these to be in place."})
@@ -783,6 +783,8 @@ if __name__ == "__main__":
     p.add_argument("--name", default="model")
     p.add_argument("--epochs", type=int, default=20)
     p.add_argument("--batch-size", type=int, default=32)
+    p.add_argument("--pth-only", action="store_true", help="Stop after saving .pth, skip ONNX/HEF compile")
     args = p.parse_args()
     run({"json_path": args.json, "model_name": args.name,
-         "epochs": args.epochs, "batch_size": args.batch_size})
+         "epochs": args.epochs, "batch_size": args.batch_size,
+         "pth_only": args.pth_only})

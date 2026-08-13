@@ -75,6 +75,37 @@ def train():
     return jsonify({"status": "started"})
 
 
+@app.route("/api/train_pth", methods=["POST"])
+def train_pth():
+    """Antrenament complet dar se opreste dupa .pth - fara ONNX/HEF compile."""
+    global _running, _events, _stop_requested
+    import train as train_module
+
+    with _lock:
+        if _running:
+            return jsonify({"error": "A job is already running."}), 409
+        config = request.json or {}
+        if not config.get("json_path"):
+            return jsonify({"error": "json_path is required."}), 400
+        config["pth_only"] = True
+        _running = True
+        _stop_requested = False
+        _events = []
+
+    def worker():
+        global _running
+        try:
+            train_module.run(config, _push, _should_stop)
+        except Exception:
+            _push({"type": "log", "level": "error", "text": traceback.format_exc()})
+            _push({"type": "done"})
+        finally:
+            _running = False
+
+    threading.Thread(target=worker, daemon=True).start()
+    return jsonify({"status": "started"})
+
+
 @app.route("/api/compile", methods=["POST"])
 def compile_only():
     """Recompile an already-trained model to HEF without retraining - for

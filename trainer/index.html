@@ -32,17 +32,15 @@
   #progress { height: 6px; background: #333; border-radius: 3px; overflow: hidden; margin-top: 10px; }
   #progressBar { height: 100%; width: 0%; background: #0c8; transition: width 0.2s; }
 
-  /* Toggle switch */
-  .toggle-wrap { display: flex; align-items: center; gap: 14px; margin-bottom: 20px; max-width: 640px; }
-  .toggle-label { font-size: 14px; color: #aaa; }
-  .toggle-label.active { color: #0c8; font-weight: 600; }
-  .switch { position: relative; display: inline-block; width: 52px; height: 26px; flex-shrink: 0; }
-  .switch input { opacity: 0; width: 0; height: 0; }
-  .slider { position: absolute; cursor: pointer; inset: 0; background: #0c8; border-radius: 26px; transition: .3s; }
-  .slider:before { position: absolute; content: ""; height: 20px; width: 20px; left: 3px; bottom: 3px;
-                   background: #000; border-radius: 50%; transition: .3s; }
-  input:checked + .slider { background: #0af; }
-  input:checked + .slider:before { transform: translateX(26px); }
+  /* Triple switch */
+  .triple-switch { display: flex; background: #1a1a1a; border: 1px solid #333; border-radius: 8px;
+                   overflow: hidden; margin-bottom: 20px; max-width: 640px; }
+  .triple-switch button { flex: 1; padding: 10px; border: none; background: transparent; color: #666;
+                          font-size: 13px; cursor: pointer; transition: all .2s; border-right: 1px solid #333; }
+  .triple-switch button:last-child { border-right: none; }
+  .triple-switch button.active { background: #0c8; color: #000; font-weight: 700; }
+  .triple-switch button:nth-child(2).active { background: #0af; }
+  .triple-switch button:nth-child(3).active { background: #f80; color: #000; }
 
   .mode-panel { display: none; }
   .mode-panel.visible { display: block; }
@@ -51,14 +49,11 @@
 <body>
 <h1>RoboPacerV2 Trainer</h1>
 
-<!-- Toggle switch -->
-<div class="toggle-wrap">
-  <span class="toggle-label" id="labelLeft">Antrenament complet</span>
-  <label class="switch">
-    <input type="checkbox" id="modeSwitch" onchange="switchMode()">
-    <span class="slider"></span>
-  </label>
-  <span class="toggle-label" id="labelRight">Compilare din PTH</span>
+<!-- Triple switch -->
+<div class="triple-switch">
+  <button id="tab0" onclick="setMode(0)">🖥️ Antrenament complet</button>
+  <button id="tab1" onclick="setMode(1)">☁️ Antrenament → PTH (RunPod)</button>
+  <button id="tab2" onclick="setMode(2)">⚙️ Compilare din PTH</button>
 </div>
 
 <!-- ═══════════════ STANGA: Antrenament complet ═══════════════ -->
@@ -93,6 +88,42 @@
     <button class="btn-gray"  id="smoketestBtn" onclick="smokeTest()" title="0 epoch - testeaza doar export+Docker+compile.">⚡ Test export</button>
   </div>
   <div id="progress"><div id="progressBar"></div></div>
+</div>
+
+<!-- ═══════════════ MIJLOC: Antrenament → PTH only (RunPod) ═══════════════ -->
+<div class="card mode-panel" id="panelPthOnly">
+  <div style="background:#0a1a1a; border:1px solid #0af; border-radius:6px; padding:10px 14px; margin-bottom:12px; font-size:13px; color:#0af;">
+    ☁️ Mod RunPod — antrenează și salvează doar <b>.pth</b>. Fără Docker/Hailo. Ideal pentru cloud fără Hailo SDK.
+  </div>
+
+  <div class="browse-row">
+    <div style="flex:1">
+      <label>Dataset folder sau driving_log.json</label>
+      <input id="jsonPathPth" placeholder="D:\RoboPacerV2\set1">
+    </div>
+    <button class="browse-btn" onclick="browseFolder('jsonPathPth')" style="margin-top:22px">📁 Browse</button>
+  </div>
+
+  <div class="row">
+    <div>
+      <label>Model name</label>
+      <input id="modelNamePth" value="model_cloud">
+    </div>
+    <div>
+      <label>Epochs</label>
+      <input id="epochsPth" type="number" value="20">
+    </div>
+    <div>
+      <label>Batch size</label>
+      <input id="batchSizePth" type="number" value="32">
+    </div>
+  </div>
+
+  <div>
+    <button class="btn-blue" id="startPthBtn" onclick="startTrainPth()">▶ Start (PTH only)</button>
+    <button class="btn-red"  id="stopBtn3" onclick="stopTraining()" disabled>■ Stop</button>
+  </div>
+  <div id="progress2"><div id="progressBar2" style="height:6px;background:#0af;width:0%;transition:width .2s;border-radius:3px;margin-top:10px;"></div></div>
 </div>
 
 <!-- ═══════════════ DREAPTA: Compilare din PTH ═══════════════ -->
@@ -135,15 +166,16 @@ const logEl = document.getElementById("log");
 const progressBar = document.getElementById("progressBar");
 
 // ── Mode switch ──────────────────────────────────────────────
-function switchMode() {
-  const isPth = document.getElementById("modeSwitch").checked;
-  document.getElementById("panelTrain").classList.toggle("visible", !isPth);
-  document.getElementById("panelPth").classList.toggle("visible", isPth);
-  document.getElementById("labelLeft").classList.toggle("active", !isPth);
-  document.getElementById("labelRight").classList.toggle("active", isPth);
+const panels = ["panelTrain", "panelPthOnly", "panelPth"];
+function setMode(n) {
+  panels.forEach((id, i) => {
+    document.getElementById(id).classList.toggle("visible", i === n);
+  });
+  [0,1,2].forEach(i => {
+    document.getElementById("tab" + i).classList.toggle("active", i === n);
+  });
 }
-// Init
-document.getElementById("labelLeft").classList.add("active");
+setMode(0);
 
 // ── Browse helpers ───────────────────────────────────────────
 async function browseFolder(inputId) {
@@ -167,28 +199,20 @@ function logLine(text, level) {
 }
 
 // ── Button state ─────────────────────────────────────────────
-const trainBtns  = ["startBtn","compileBtn","smoketestBtn"];
-const pthBtns    = ["compilePthBtn","smoketestPthBtn"];
+const startBtns = ["startBtn","compileBtn","smoketestBtn","startPthBtn","compilePthBtn","smoketestPthBtn"];
+const stopBtns  = ["stopBtn","stopBtn2","stopBtn3"];
 
 async function refreshStatus() {
   const r = await fetch("/api/status");
   const data = await r.json();
   const running = data.running;
-  [...trainBtns, ...pthBtns].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.disabled = running;
-  });
-  document.getElementById("stopBtn").disabled   = !running;
-  document.getElementById("stopBtn2").disabled  = !running;
+  startBtns.forEach(id => { const el = document.getElementById(id); if (el) el.disabled = running; });
+  stopBtns.forEach(id  => { const el = document.getElementById(id); if (el) el.disabled = !running; });
 }
 
 function attachStream() {
-  [...trainBtns, ...pthBtns].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.disabled = true;
-  });
-  document.getElementById("stopBtn").disabled  = false;
-  document.getElementById("stopBtn2").disabled = false;
+  startBtns.forEach(id => { const el = document.getElementById(id); if (el) el.disabled = true; });
+  stopBtns.forEach(id  => { const el = document.getElementById(id); if (el) el.disabled = false; });
 
   const stream = new EventSource("/api/stream");
   stream.onmessage = (e) => {
@@ -245,6 +269,21 @@ async function smokeTest() {
   logEl.innerHTML = ""; progressBar.style.width = "0%";
   logLine("Test 0-epoch: verific export+Docker+compile...", "info");
   const res = await fetch("/api/smoketest", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(config) });
+  if (!res.ok) { logLine("Eroare: " + (await res.json()).error, "error"); return; }
+  attachStream();
+}
+
+// ── Antrenament PTH only (RunPod) ───────────────────────────
+async function startTrainPth() {
+  const config = {
+    json_path:  document.getElementById("jsonPathPth").value.trim(),
+    model_name: document.getElementById("modelNamePth").value.trim() || "model_cloud",
+    epochs:     parseInt(document.getElementById("epochsPth").value, 10) || 20,
+    batch_size: parseInt(document.getElementById("batchSizePth").value, 10) || 32,
+  };
+  if (!config.json_path) { alert("Seteaza folderul cu dataset mai intai."); return; }
+  logEl.innerHTML = ""; progressBar.style.width = "0%";
+  const res = await fetch("/api/train_pth", { method: "POST", headers: {"Content-Type":"application/json"}, body: JSON.stringify(config) });
   if (!res.ok) { logLine("Eroare: " + (await res.json()).error, "error"); return; }
   attachStream();
 }

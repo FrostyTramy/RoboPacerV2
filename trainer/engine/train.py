@@ -618,6 +618,12 @@ def run(config, push=None, should_stop=None):
     model.eval()
     push({"type": "file", "name": f"{model_name}.pth"})
 
+    if config.get("pth_only"):
+        push({"type": "log", "level": "success",
+              "text": f"PTH salvat: models/{model_name}.pth — descarca-l si compileaza local."})
+        push({"type": "done"})
+        return
+
     onnx_path = MODELS_DIR / f"{model_name}.onnx"
     push({"type": "log", "level": "info", "text": "Exporting ONNX..."})
     export_onnx(model, device, onnx_path, frame_stack_n)

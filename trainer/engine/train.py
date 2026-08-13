@@ -714,6 +714,63 @@ def retry_compile(config, push=None):
     push({"type": "done"})
 
 
+def compile_from_pth(config, push=None):
+    """Incarca un .pth extern, il exporta ONNX si compileaza HEF.
+    config keys: pth_path, model_name, calib_npy (optional)."""
+    if push is None:
+        push = lambda e: print(e.get("text", e))
+
+    pth_path  = Path((config.get("pth_path") or "").strip())
+    model_name = (config.get("model_name") or "model").strip() or "model"
+    MODELS_DIR.mkdir(exist_ok=True)
+    onnx_path  = MODELS_DIR / f"{model_name}.onnx"
+    calib_path = MODELS_DIR / f"{model_name}_calib_data_nhwc.npy"
+
+    if not pth_path.exists():
+        push({"type": "log", "level": "error", "text": f"Fisierul PTH nu exista: {pth_path}"})
+        push({"type": "done"})
+        return
+
+    push({"type": "log", "level": "info", "text": f"Incarcare checkpoint: {pth_path.name}"})
+    state = torch.load(str(pth_path), map_location="cpu")
+    # Detecteaza frame_stack_n din forma primului strat conv
+    frame_stack_n = state["conv1.weight"].shape[1] // 3
+    push({"type": "log", "level": "info", "text": f"frame_stack_n detectat: {frame_stack_n}"})
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = build_model(frame_stack_n).to(device)
+    model.load_state_dict(state)
+    model.eval()
+    push({"type": "log", "level": "info", "text": "Model incarcat. Export ONNX..."})
+    export_onnx(model, device, onnx_path, frame_stack_n)
+    push({"type": "log", "level": "success", "text": f"ONNX exportat: models/{model_name}.onnx"})
+
+    # Calibrare — genereaza date sintetice daca nu exista calib real
+    if not calib_path.exists():
+        calib_npy_str = (config.get("calib_npy") or "").strip()
+        if calib_npy_str and Path(calib_npy_str).exists():
+            import shutil
+            shutil.copy(calib_npy_str, calib_path)
+            push({"type": "log", "level": "info", "text": "Date calibrare copiate."})
+        else:
+            push({"type": "log", "level": "warning",
+                  "text": "Date calibrare lipsa - generez date sintetice (precizie quantizare mai slaba)."})
+            calib = np.random.randn(CALIB_N, IMG_SIZE, IMG_SIZE, 3 * frame_stack_n).astype(np.float32)
+            np.save(str(calib_path), calib)
+
+    if not check_compile_prereqs(push):
+        push({"type": "done"})
+        return
+
+    ok = compile_hef(model_name, push)
+    if ok:
+        onnx_path.unlink(missing_ok=True)
+        for tmp in [MODELS_DIR / f"{model_name}.har", MODELS_DIR / f"{model_name}_optimized.har"]:
+            tmp.unlink(missing_ok=True)
+        push({"type": "file", "name": f"{model_name}.hef"})
+    push({"type": "done"})
+
+
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--json", required=True, help="Path to driving_log.json")

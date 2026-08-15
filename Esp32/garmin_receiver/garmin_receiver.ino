@@ -7,8 +7,8 @@
 #define LED_PIN             4
 #define WATCHDOG_TIMEOUT_MS 2000
 #define ENCODER_PIN         14   // A0 al KY-024 conectat la GPIO14
-#define MAG_THRESHOLD_ON    1000  // val < asta = magnet detectat
-#define MAG_THRESHOLD_OFF   1500 // val > asta = magnet disparut
+#define MAG_THRESHOLD_ON    2700  // val > asta = magnet detectat
+#define MAG_THRESHOLD_OFF   2000  // val < asta = magnet disparut
 #define MAGNETS             4
 
 unsigned long lastPulseUs      = 0;
@@ -170,9 +170,9 @@ void loop() {
     int val = analogRead(ENCODER_PIN);
     bool magnet;
     if (!magnetPresent) {
-        magnet = (val < MAG_THRESHOLD_ON);   // detectat doar sub 900
+        magnet = (val > MAG_THRESHOLD_ON);
     } else {
-        magnet = (val < MAG_THRESHOLD_OFF);  // resetat doar cand trece peste 1500
+        magnet = (val > MAG_THRESHOLD_OFF);
     }
 
     if (magnet && !magnetPresent) {

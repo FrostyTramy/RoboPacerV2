@@ -253,8 +253,14 @@ This project is open source and available under the [MIT License](LICENSE).
 
 ---
 
+## About the author
+
+**Dumitrascu Tudor Dominik** — 16 y/o from Romania, studying Electronics and Automation at *Colegiul Tehnic Emanuil Ungureanu*. My hobbies are robotics and programming, and RoboPacer V2 is what happens when you mix both.
+
+---
+
 <div align="center">
 
-Built with a lot of soldering, a few crashes, and way too many late nights. — *FrostyTramy*
+Built with a lot of soldering, a few crashes, and way too many late nights.
 
 </div>

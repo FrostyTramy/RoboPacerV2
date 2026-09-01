@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🤖 RoboPacer V2
+# RoboPacer V2
 
 **An open-source autonomous RC racing robot powered by a Raspberry Pi 5 and a Hailo-8 AI accelerator.**
 

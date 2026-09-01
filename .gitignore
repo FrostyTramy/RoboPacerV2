@@ -12,6 +12,10 @@
 *.jpeg
 *.png
 *.mp4
+# Allow README images
+!docs/images/*.jpg
+!docs/images/*.jpeg
+!docs/images/*.png
 data_recorder/set1/
 data_recorder/set2/
 data_recorder/Pista-biciclete/

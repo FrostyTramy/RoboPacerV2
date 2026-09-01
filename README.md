@@ -27,6 +27,12 @@ It records how *you* drive, trains a neural network on that data, then drives it
 
 ---
 
+## About the author
+
+Hi, I'm **Dumitrascu Tudor Dominik**, a 16 year old from Romania studying Electronics and Automation at *Colegiul Tehnic Emanuil Ungureanu*. My hobbies are robotics and programming — and RoboPacer V2 is what happens when you combine both.
+
+---
+
 ## What is RoboPacer V2?
 
 RoboPacer V2 is a fully autonomous RC car you build yourself. It learns to steer by watching you drive, then runs that model live on a dedicated AI chip at inference time. A PI cruise-control loop holds whatever speed (km/h) you tell it to maintain over a target distance. Everything — training, live telemetry, lap control — is managed from a web dashboard running on the Pi itself.
@@ -251,11 +257,6 @@ Pull requests are welcome. For bigger changes, open an issue first so we can dis
 
 This project is open source and available under the [MIT License](LICENSE).
 
----
-
-## About the author
-
-**Dumitrascu Tudor Dominik** — 16 y/o from Romania, studying Electronics and Automation at *Colegiul Tehnic Emanuil Ungureanu*. My hobbies are robotics and programming, and RoboPacer V2 is what happens when you mix both.
 
 ---
 

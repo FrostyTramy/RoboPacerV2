@@ -24,6 +24,8 @@ trainer/models/
 trainer/engine/compile/resources/
 set*/
 Pista-biciclete/
+PistaAtletism/
+PistaAtletism.zip
 manual_drive/speed_logs/
 cruise_control/logs/
 main/logs/

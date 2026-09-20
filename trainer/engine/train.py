@@ -294,7 +294,7 @@ def build_model(frame_stack_n=FRAME_STACK_N):
 
 # ── Train / eval ────────────────────────────────────────────────────────
 
-def _train_epoch(model, loader, optimizer, device, push, epoch, epochs):
+def _train_epoch(model, loader, optimizer, device, push, epoch, epochs, use_amp=False):
     model.train()
     total, samples = 0.0, 0
     n = len(loader)
@@ -302,7 +302,11 @@ def _train_epoch(model, loader, optimizer, device, push, epoch, epochs):
     for i, (imgs, angles) in enumerate(loader):
         imgs, angles = imgs.to(device), angles.to(device)
         optimizer.zero_grad()
-        loss = nn.functional.mse_loss(model(imgs).squeeze(1), angles)
+        if use_amp:
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                loss = nn.functional.mse_loss(model(imgs).squeeze(1), angles)
+        else:
+            loss = nn.functional.mse_loss(model(imgs).squeeze(1), angles)
         loss.backward()
         optimizer.step()
         total += loss.item() * len(imgs)
@@ -314,12 +318,16 @@ def _train_epoch(model, loader, optimizer, device, push, epoch, epochs):
 
 
 @torch.no_grad()
-def _eval_epoch(model, loader, device):
+def _eval_epoch(model, loader, device, use_amp=False):
     model.eval()
     total = 0.0
     for imgs, angles in loader:
         imgs, angles = imgs.to(device), angles.to(device)
-        total += nn.functional.mse_loss(model(imgs).squeeze(1), angles).item() * len(imgs)
+        if use_amp:
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                total += nn.functional.mse_loss(model(imgs).squeeze(1), angles).item() * len(imgs)
+        else:
+            total += nn.functional.mse_loss(model(imgs).squeeze(1), angles).item() * len(imgs)
     return total / len(loader.dataset)
 
 
@@ -529,7 +537,7 @@ def run(config, push=None, should_stop=None):
         json_path = json_path / "driving_log.json"
     model_name = config.get("model_name", "model").strip() or "model"
     epochs = int(config.get("epochs", 20))
-    batch_size = int(config.get("batch_size", 32))
+    batch_size = int(config.get("batch_size") or (128 if config.get("a100") else 32))
     MODELS_DIR.mkdir(exist_ok=True)
 
     if not json_path.exists():
@@ -545,6 +553,9 @@ def run(config, push=None, should_stop=None):
     random.seed(42)
     torch.manual_seed(42)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    use_amp = config.get("a100") and device.type == "cuda"
+    if use_amp:
+        torch.backends.cudnn.benchmark = True
     push({"type": "log", "level": "info", "text": f"Device: {device}"})
 
     with open(json_path) as f:
@@ -588,10 +599,14 @@ def run(config, push=None, should_stop=None):
 
     train_weights = _balanced_sample_weights(records_sorted, train_idx)
     train_sampler = WeightedRandomSampler(train_weights, num_samples=len(train_idx), replacement=True)
+    num_workers = 4 if config.get("a100") else 0
+    pin_memory = use_amp
     train_ld = DataLoader(SteeringDataset(records_sorted, train_idx, data_root, augment=True, frame_stack_n=frame_stack_n),
-                           batch_size=batch_size, sampler=train_sampler, num_workers=0)
+                           batch_size=batch_size, sampler=train_sampler, num_workers=num_workers,
+                           persistent_workers=num_workers > 0, pin_memory=pin_memory)
     val_ld = DataLoader(SteeringDataset(records_sorted, val_idx, data_root, augment=False, frame_stack_n=frame_stack_n),
-                         batch_size=batch_size, shuffle=False, num_workers=0)
+                         batch_size=batch_size, shuffle=False, num_workers=num_workers,
+                         persistent_workers=num_workers > 0, pin_memory=pin_memory)
 
     model = build_model(frame_stack_n).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-4)
@@ -600,8 +615,8 @@ def run(config, push=None, should_stop=None):
     ckpt_path = MODELS_DIR / f"{model_name}.pth"
 
     for epoch in range(1, epochs + 1):
-        train_loss = _train_epoch(model, train_ld, optimizer, device, push, epoch, epochs)
-        val_loss = _eval_epoch(model, val_ld, device)
+        train_loss = _train_epoch(model, train_ld, optimizer, device, push, epoch, epochs, use_amp=use_amp)
+        val_loss = _eval_epoch(model, val_ld, device, use_amp=use_amp)
         scheduler.step()
         is_best = val_loss < best_val
         if is_best:
@@ -782,9 +797,10 @@ if __name__ == "__main__":
     p.add_argument("--json", required=True, help="Path to driving_log.json")
     p.add_argument("--name", default="model")
     p.add_argument("--epochs", type=int, default=20)
-    p.add_argument("--batch-size", type=int, default=32)
+    p.add_argument("--batch-size", type=int, default=None)
     p.add_argument("--pth-only", action="store_true", help="Stop after saving .pth, skip ONNX/HEF compile")
+    p.add_argument("--a100", action="store_true", help="Enable A100 optimizations: BF16 AMP, num_workers=4, batch 128, pin_memory, cudnn.benchmark")
     args = p.parse_args()
     run({"json_path": args.json, "model_name": args.name,
          "epochs": args.epochs, "batch_size": args.batch_size,
-         "pth_only": args.pth_only})
+         "pth_only": args.pth_only, "a100": args.a100})

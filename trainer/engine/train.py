@@ -356,13 +356,13 @@ def build_model(frame_stack_n=FRAME_STACK_N):
 
 # ── Train / eval ────────────────────────────────────────────────────────
 
-def _train_epoch(model, loader, optimizer, device, push, epoch, epochs, use_amp=False):
+def _train_epoch(model, loader, optimizer, device, push, epoch, epochs, use_amp=False, non_blocking=False):
     model.train()
     total, samples = 0.0, 0
     n = len(loader)
     log_step = max(1, n // 10)
     for i, (imgs, angles) in enumerate(loader):
-        imgs, angles = imgs.to(device), angles.to(device)
+        imgs, angles = imgs.to(device, non_blocking=non_blocking), angles.to(device, non_blocking=non_blocking)
         optimizer.zero_grad()
         if use_amp:
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
@@ -380,11 +380,11 @@ def _train_epoch(model, loader, optimizer, device, push, epoch, epochs, use_amp=
 
 
 @torch.no_grad()
-def _eval_epoch(model, loader, device, use_amp=False):
+def _eval_epoch(model, loader, device, use_amp=False, non_blocking=False):
     model.eval()
     total = 0.0
     for imgs, angles in loader:
-        imgs, angles = imgs.to(device), angles.to(device)
+        imgs, angles = imgs.to(device, non_blocking=non_blocking), angles.to(device, non_blocking=non_blocking)
         if use_amp:
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 total += nn.functional.mse_loss(model(imgs).squeeze(1), angles).item() * len(imgs)
@@ -599,7 +599,15 @@ def run(config, push=None, should_stop=None):
         json_path = json_path / "driving_log.json"
     model_name = config.get("model_name", "model").strip() or "model"
     epochs = int(config.get("epochs", 20))
-    batch_size = int(config.get("batch_size") or (512 if config.get("a100") else 32))
+    # 256, not the 512 the A100 could brute-force: your validated recipe was
+    # batch 32 (~2233 weight updates/epoch). Every doubling of batch size
+    # halves how many updates the optimizer gets per epoch at a fixed LR, so
+    # this stays as small as the A100 can comfortably run at near-full
+    # utilization (RAM cache + torch.compile below already fixed the actual
+    # bottleneck, disk I/O - batch size no longer needs to do that job too)
+    # rather than maximizing GPU throughput at the cost of drifting further
+    # from what's known to converge well.
+    batch_size = int(config.get("batch_size") or (256 if config.get("a100") else 32))
     MODELS_DIR.mkdir(exist_ok=True)
 
     if not json_path.exists():
@@ -669,7 +677,15 @@ def run(config, push=None, should_stop=None):
     train_ld = DataLoader(SteeringDataset(records_sorted, train_idx, data_root, augment=True, frame_stack_n=frame_stack_n,
                                            cache=cache),
                            batch_size=batch_size, sampler=train_sampler, num_workers=num_workers,
-                           persistent_workers=num_workers > 0, pin_memory=pin_memory, **extra_kwargs)
+                           persistent_workers=num_workers > 0, pin_memory=pin_memory,
+                           # drop_last: only matters for a100 (batch_size=32's ~2233
+                           # batches/epoch already divide train_idx evenly enough not
+                           # to need it) - keeps every training batch the same shape,
+                           # so torch.compile doesn't have to also handle/recompile
+                           # for one odd-sized tail batch per epoch, and BatchNorm
+                           # never sees a tiny, noisier tail batch. Drops at most
+                           # batch_size-1 samples out of 71k+ - negligible.
+                           drop_last=bool(config.get("a100")), **extra_kwargs)
     val_ld = DataLoader(SteeringDataset(records_sorted, val_idx, data_root, augment=False, frame_stack_n=frame_stack_n,
                                          cache=cache),
                          batch_size=batch_size, shuffle=False, num_workers=num_workers,
@@ -694,8 +710,9 @@ def run(config, push=None, should_stop=None):
     ckpt_path = MODELS_DIR / f"{model_name}.pth"
 
     for epoch in range(1, epochs + 1):
-        train_loss = _train_epoch(train_model, train_ld, optimizer, device, push, epoch, epochs, use_amp=use_amp)
-        val_loss = _eval_epoch(train_model, val_ld, device, use_amp=use_amp)
+        train_loss = _train_epoch(train_model, train_ld, optimizer, device, push, epoch, epochs,
+                                   use_amp=use_amp, non_blocking=pin_memory)
+        val_loss = _eval_epoch(train_model, val_ld, device, use_amp=use_amp, non_blocking=pin_memory)
         scheduler.step()
         is_best = val_loss < best_val
         if is_best:
@@ -880,7 +897,7 @@ if __name__ == "__main__":
     p.add_argument("--pth-only", action="store_true", help="Stop after saving .pth, skip ONNX/HEF compile")
     p.add_argument("--a100", action="store_true",
                     help="Enable A100 optimizations: RAM frame cache, BF16 AMP, torch.compile, "
-                         "num_workers=12, batch 512, pin_memory, cudnn.benchmark")
+                         "num_workers=12, batch 256, pin_memory, cudnn.benchmark, async H2D transfer")
     args = p.parse_args()
     run({"json_path": args.json, "model_name": args.name,
          "epochs": args.epochs, "batch_size": args.batch_size,

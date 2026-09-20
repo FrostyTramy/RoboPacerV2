@@ -121,6 +121,8 @@ button {
 .flag-option { display: flex; align-items: center; gap: 8px; font-size: 0.9rem; cursor: pointer; }
 .flag-option input { width: 16px; height: 16px; }
 
+.dataset-list { display: flex; flex-direction: column; gap: 10px; max-height: 40vh; overflow-y: auto; }
+
 .modal-backdrop {
     display: none;
     position: fixed; inset: 0;

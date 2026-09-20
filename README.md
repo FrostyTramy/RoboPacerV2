@@ -144,6 +144,8 @@ python3 data_recorder/data_recorder.py
 # Output: data_recorder/set1/driving_log.json + frames/
 ```
 
+By default it records into `set1`. Pick the folder per run with `--dataset NAME` (appends to `data_recorder/NAME/`, numbering new frames from its last one) or `--new-dataset` (starts a blank `set<N>`). The web dashboard's Data Recorder page lists every folder that already has frames plus a "Folder nou" option and passes the right flag for you.
+
 Drive a mix of straights and turns — the more variety, the better the trained model. Aim for at least a few hundred frames per turn direction.
 
 ---

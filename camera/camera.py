@@ -1,15 +1,19 @@
 import os
+import sys
 import time
 import logging
 import cv2
 from datetime import datetime
-from picamera2 import Picamera2
 from picamera2.encoders import H264Encoder
 from picamera2.outputs import FfmpegOutput
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-TUNING_FILE = "/usr/share/libcamera/ipa/rpi/pisp/imx219.json"
+# Camera configuration lives in camera_config.py (repo root), shared with
+# every other script so this live view matches what gets recorded and driven on.
+sys.path.append(os.path.dirname(BASE_DIR))
+from camera_config import make_camera
+
 RECORDS_DIR = os.path.join(BASE_DIR, "records")
 LOG_FILE = os.path.join(BASE_DIR, "camera.log")
 
@@ -24,16 +28,9 @@ logging.basicConfig(
 for noisy in ("picamera2", "libcamera", "PIL"):
     logging.getLogger(noisy).setLevel(logging.CRITICAL)
 
-tuning = Picamera2.load_tuning_file(TUNING_FILE)
-picam2 = Picamera2(tuning=tuning)
-
-config = picam2.create_video_configuration(
-    main={"size": (640, 480), "format": "RGB888"},
-    controls={"FrameRate": 120.0},
-)
-picam2.configure(config)
+picam2 = make_camera()
 picam2.start()
-logging.info("Camera started — 640x480 @ 120fps, auto exposure/gain/AWB")
+logging.info("Camera started — camera_config.py settings (640x480 full-FOV, auto exposure/AWB)")
 
 encoder = H264Encoder(bitrate=8_000_000, repeat=True, iperiod=60)
 

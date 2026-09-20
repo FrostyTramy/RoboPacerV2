@@ -6,10 +6,10 @@ style dataset) while an Xbox controller drives the car through a PCA9685
 (servo = steering on channel 0, ESC = throttle on channel 1 — verify this
 against your actual wiring; see SERVO_CHANNEL / ESC_CHANNEL below).
 
-Camera settings match camera.py (640x480 RGB888 @ 120fps, IMX219 NoIR
-tuning; AnalogueGain 12 here vs camera.py's 16, reduced for outdoor
-daylight) so the live-view app and this recorder agree on what the model
-will actually see.
+Camera settings come from camera_config.py (repo root), shared with
+camera.py, main.py, model_runner.py and camera_calibrate.py so the live-view
+app, this recorder and the driving scripts all agree on what the model will
+actually see.
 
 --------------------------------------------------------------------------
 How the ESC is actually controlled
@@ -70,9 +70,11 @@ import json
 import logging
 import os
 import queue
+import re
 import select
 import signal
 import socket
+import sys
 import threading
 import time
 
@@ -83,19 +85,26 @@ import numpy as np
 from adafruit_motor import servo as adafruit_servo
 from adafruit_pca9685 import PCA9685
 from evdev import InputDevice, ecodes, ff, list_devices
-from picamera2 import Picamera2
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root
+from camera_config import FRAME_SIZE, make_camera
 
 # ---------------------------------------------------------------------------
 # Paths - everything this script reads/writes lives next to it, in its own
 # folder, separate from the rest of RoboPacerV2.
 # ---------------------------------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATASET_DIR = os.path.join(BASE_DIR, "set1")
-FRAMES_DIR = os.path.join(DATASET_DIR, "frames")
-LOG_JSON_PATH = os.path.join(DATASET_DIR, "driving_log.json")
 LOG_FILE_PATH = os.path.join(BASE_DIR, "data_recorder.log")
 
-os.makedirs(FRAMES_DIR, exist_ok=True)
+# Which dataset folder (a subfolder of BASE_DIR holding frames/ +
+# driving_log.json) this run records into. Chosen per run with --dataset /
+# --new-dataset (the dashboard's dataset picker passes one of them), so these
+# stay unset until select_dataset() runs at the top of main().
+DEFAULT_DATASET = "set1"  # what a bare CLI run without --dataset/--new-dataset uses
+DATASET_NAME_RE = re.compile(r"[A-Za-z0-9_-]+")  # no separators/dots - keeps the name inside BASE_DIR
+DATASET_DIR = None
+FRAMES_DIR = None
+LOG_JSON_PATH = None
 
 logging.basicConfig(
     filename=LOG_FILE_PATH,
@@ -107,14 +116,8 @@ for noisy in ("picamera2", "libcamera", "PIL"):
     logging.getLogger(noisy).setLevel(logging.CRITICAL)
 
 # ---------------------------------------------------------------------------
-# Camera - identical configuration to camera.py
+# Camera - configuration lives in camera_config.py (shared by every script)
 # ---------------------------------------------------------------------------
-TUNING_FILE = "/usr/share/libcamera/ipa/rpi/pisp/imx219_noir.json"
-FRAME_SIZE = (640, 480)
-FRAME_FORMAT = "RGB888"
-FRAME_RATE = 120.0
-ANALOGUE_GAIN = 12.0  # 16.0 * 0.75 - reduced 25% for outdoor daylight use
-
 SAVED_FRAME_SIZE = (640, 480)  # frame size written to disk for training (matches FRAME_SIZE)
 
 # ---------------------------------------------------------------------------
@@ -277,6 +280,27 @@ def find_xbox_controller():
     return None
 
 
+def select_dataset(name):
+    """Point the module-level dataset paths at BASE_DIR/<name>. Only sets the
+    paths - the folder itself is created lazily by the writer thread on the
+    first saved frame, so starting a run and never recording doesn't leave an
+    empty folder behind."""
+    global DATASET_DIR, FRAMES_DIR, LOG_JSON_PATH
+    if not DATASET_NAME_RE.fullmatch(name):
+        raise ValueError(f"Nume de dataset invalid: {name!r} (doar litere, cifre, _ si -)")
+    DATASET_DIR = os.path.join(BASE_DIR, name)
+    FRAMES_DIR = os.path.join(DATASET_DIR, "frames")
+    LOG_JSON_PATH = os.path.join(DATASET_DIR, "driving_log.json")
+
+
+def new_dataset_name():
+    """Next free 'set<N>' - one past the highest N already in BASE_DIR (empty
+    folders included, so a name is never handed out twice)."""
+    taken = [int(m.group(1)) for entry in os.listdir(BASE_DIR)
+             if (m := re.fullmatch(r"set(\d+)", entry)) and os.path.isdir(os.path.join(BASE_DIR, entry))]
+    return f"set{max(taken) + 1 if taken else 1}"
+
+
 def load_driving_log():
     if os.path.exists(LOG_JSON_PATH) and os.path.getsize(LOG_JSON_PATH) > 0:
         try:
@@ -312,12 +336,16 @@ def _writer_loop(write_queue, driving_log, frames_dir, legacy_format):
     and main.py do the equivalent detection at inference time from the
     compiled model's own input shape. See --legacy's help text below for
     why you'd choose either."""
+    frames_dir_ready = False
     while True:
         item = write_queue.get()
         if item is None:  # sentinel - drain requested, stop
             write_queue.task_done()
             return
         image_filename, saved_frame, steering_label, ts = item
+        if not frames_dir_ready:
+            os.makedirs(frames_dir, exist_ok=True)
+            frames_dir_ready = True
         cv2.imwrite(os.path.join(frames_dir, image_filename), saved_frame)
         record = {
             "image_path": f"{os.path.basename(frames_dir)}/{image_filename}",
@@ -330,6 +358,8 @@ def _writer_loop(write_queue, driving_log, frames_dir, legacy_format):
 
 
 def next_frame_index():
+    if not os.path.isdir(FRAMES_DIR):  # brand-new dataset - nothing recorded yet
+        return 0
     existing = [f for f in os.listdir(FRAMES_DIR) if f.startswith("frame_") and f.endswith(".jpg")]
     indices = []
     for name in existing:
@@ -338,17 +368,6 @@ def next_frame_index():
         except (IndexError, ValueError):
             continue
     return max(indices) + 1 if indices else 0
-
-
-def make_camera():
-    tuning = Picamera2.load_tuning_file(TUNING_FILE)
-    picam2 = Picamera2(tuning=tuning)
-    config = picam2.create_video_configuration(
-        main={"size": FRAME_SIZE, "format": FRAME_FORMAT},
-        controls={"FrameRate": FRAME_RATE, "AnalogueGain": ANALOGUE_GAIN},
-    )
-    picam2.configure(config)
-    return picam2
 
 
 def _handle_sigterm(signum, frame):
@@ -388,7 +407,20 @@ def main():
     ap.add_argument("--display", action="store_true",
                      help="Open a live cv2 preview window (costs a few ms/frame). "
                           "Default is headless - status is printed to the console instead.")
+    ds_group = ap.add_mutually_exclusive_group()
+    ds_group.add_argument("--dataset", metavar="NAME", default=None,
+                          help="Record into data_recorder/NAME/, continuing from its last "
+                               "frame if it already has some (frames + driving_log.json are "
+                               f"appended to). Default: {DEFAULT_DATASET}.")
+    ds_group.add_argument("--new-dataset", action="store_true",
+                          help="Start a fresh, empty dataset folder (next free set<N>) "
+                               "instead of continuing an existing one.")
     args = ap.parse_args()
+    dataset_name = new_dataset_name() if args.new_dataset else (args.dataset or DEFAULT_DATASET)
+    try:
+        select_dataset(dataset_name)
+    except ValueError as e:
+        ap.error(str(e))
     legacy_format = args.legacy
     show_display = args.display
 
@@ -401,6 +433,7 @@ def main():
     controller = None
     driving_log = load_driving_log()
     frame_index = next_frame_index()
+    print(f"Dataset: {dataset_name} ({'nou, gol' if frame_index == 0 else f'continui de la frame_{frame_index:05d}'}) - {DATASET_DIR}")
 
     last_rumble_effect_id = None
 

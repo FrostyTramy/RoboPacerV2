@@ -27,6 +27,7 @@ import json
 import logging
 import math
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -68,6 +69,39 @@ def find_script(script_id, scripts):
 
 def log_path_for(script_id):
     return os.path.join(RUN_LOGS_DIR, f"{script_id}.log")
+
+
+# Aceeasi regula ca DATASET_NAME_RE din data_recorder.py - un folder cu alt
+# nume nu poate fi ales din dashboard (si recorder-ul l-ar refuza oricum).
+DATASET_NAME_RE = re.compile(r"[A-Za-z0-9_-]+")
+FRAME_NAME_RE = re.compile(r"frame_(\d+)\.jpg")
+
+
+def list_datasets(script):
+    """Folderele din directorul scriptului (ex: data_recorder/) care contin
+    cadre in <folder>/frames/ - candidatele la "continua inregistrarea".
+    Fiecare: {name, frames, last_index} (last_index = cel mai mare NNNNN din
+    frame_NNNNN.jpg, de la care continua recorder-ul, +1)."""
+    base = os.path.dirname(script["path"])
+    datasets = []
+    for entry in os.scandir(base):
+        if not entry.is_dir() or not DATASET_NAME_RE.fullmatch(entry.name):
+            continue
+        count, last_index = 0, -1
+        try:
+            with os.scandir(os.path.join(entry.path, "frames")) as frames:
+                for f in frames:
+                    m = FRAME_NAME_RE.fullmatch(f.name)
+                    if m:
+                        count += 1
+                        last_index = max(last_index, int(m.group(1)))
+        except OSError:  # nu are frames/ - nu e folder de dataset
+            continue
+        if count:
+            datasets.append({"name": entry.name, "frames": count, "last_index": last_index})
+    # Sortare "naturala" (set2 inainte de set10).
+    datasets.sort(key=lambda d: [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", d["name"])])
+    return datasets
 
 
 def _is_alive(running):
@@ -161,6 +195,14 @@ def api_scripts():
     return jsonify(load_scripts())
 
 
+@app.route("/api/data_recorder/datasets")
+def api_data_recorder_datasets():
+    script = find_script("data_recorder", load_scripts())
+    if script is None:
+        return jsonify({"error": "unknown_script"}), 404
+    return jsonify({"datasets": list_datasets(script)})
+
+
 @app.route("/api/status")
 def api_status():
     return jsonify({"running": _status_payload()})
@@ -221,6 +263,24 @@ def api_start():
                 }), 400
             param_args.extend([p["flag"], str(value)])
 
+    # Scripturile cu "dataset_picker" (data_recorder) cer alegerea explicita a
+    # folderului: {"mode": "new"} sau {"mode": "existing", "name": ...}, cu
+    # numele verificat contra folderelor care chiar exista si au cadre.
+    dataset_args = []
+    if script.get("dataset_picker"):
+        dataset = data.get("dataset")
+        if not isinstance(dataset, dict):
+            return jsonify({"error": "missing_dataset"}), 400
+        if dataset.get("mode") == "new":
+            dataset_args = ["--new-dataset"]
+        elif dataset.get("mode") == "existing":
+            name = dataset.get("name")
+            if not isinstance(name, str) or name not in {d["name"] for d in list_datasets(script)}:
+                return jsonify({"error": "unknown_dataset", "name": name if isinstance(name, str) else None}), 400
+            dataset_args = ["--dataset", name]
+        else:
+            return jsonify({"error": "invalid_dataset"}), 400
+
     current = _status_payload()
     if current is not None:
         if current["id"] == script_id:
@@ -236,7 +296,7 @@ def api_start():
     log_file = open(log_path_for(script_id), "wb", buffering=0)
     try:
         popen = subprocess.Popen(
-            ["python3", "-u", script["path"], *requested_args, *param_args],
+            ["python3", "-u", script["path"], *requested_args, *param_args, *dataset_args],
             stdout=log_file, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
             cwd=os.path.dirname(script["path"]),
             start_new_session=True,

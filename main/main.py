@@ -15,11 +15,18 @@ itself for --distance-m meters at --target-kmh, then stops itself and
 prints a summary. [B] stops immediately at any point, same as every
 other script here.
 
+Steering defaults to RAW - the model's per-frame prediction goes straight
+to the servo, no EMA smoothing, no deadzone (pass --smooth-steering to get
+that back, e.g. for testing). Display defaults to off (headless) - pass
+--display for a live cv2 preview window. The dashboard's "Autopilot" page
+never passes either flag, so a run launched from there is always
+raw-steering + headless.
+
 Usage (normally launched from the dashboard's "Autopilot" page, which
-fills these in for you from the speed/distance form):
+fills in --target-kmh/--distance-m for you from the speed/distance form):
     python3 main.py --target-kmh 10 --distance-m 500
     python3 main.py --target-kmh 10 --distance-m 500 --display
-    python3 main.py --target-kmh 10 --distance-m 500 --raw-steering
+    python3 main.py --target-kmh 10 --distance-m 500 --smooth-steering
 
 Put exactly one *.hef file in this folder next to this script (same rule
 as model_runner.py's find_hef_path() - ambiguity about which model is
@@ -72,6 +79,7 @@ import os
 import select
 import signal
 import socket
+import sys
 import threading
 import time
 from collections import deque
@@ -84,7 +92,6 @@ import numpy as np
 from adafruit_motor import servo as adafruit_servo
 from adafruit_pca9685 import PCA9685
 from evdev import InputDevice, ecodes, ff, list_devices
-from picamera2 import Picamera2
 from hailo_platform import (
     VDevice, HEF, FormatType, InferVStreams,
     InputVStreamParams, OutputVStreamParams,
@@ -109,14 +116,12 @@ for noisy in ("picamera2", "libcamera", "PIL"):
     logging.getLogger(noisy).setLevel(logging.CRITICAL)
 
 # ---------------------------------------------------------------------------
-# Camera - identical configuration to model_runner.py/data_recorder.py, so
-# the model sees exactly what it was trained on.
+# Camera - configuration lives in camera_config.py (repo root), shared with
+# model_runner.py/data_recorder.py, so the model sees exactly what it was
+# trained on.
 # ---------------------------------------------------------------------------
-TUNING_FILE = "/usr/share/libcamera/ipa/rpi/pisp/imx219_noir.json"
-FRAME_SIZE = (640, 480)
-FRAME_FORMAT = "RGB888"
-FRAME_RATE = 120.0
-ANALOGUE_GAIN = 12.0
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root
+from camera_config import make_camera
 
 # ---------------------------------------------------------------------------
 # Steering (servo on PCA9685 channel 0) - identical to model_runner.py
@@ -297,17 +302,6 @@ def find_xbox_controller():
         if "xbox" in dev.name.lower():
             return dev
     return None
-
-
-def make_camera():
-    tuning = Picamera2.load_tuning_file(TUNING_FILE)
-    picam2 = Picamera2(tuning=tuning)
-    config = picam2.create_video_configuration(
-        main={"size": FRAME_SIZE, "format": FRAME_FORMAT},
-        controls={"FrameRate": FRAME_RATE, "AnalogueGain": ANALOGUE_GAIN},
-    )
-    picam2.configure(config)
-    return picam2
 
 
 def preprocess(frame_bgr):
@@ -630,9 +624,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--display", action="store_true",
                      help="Open a live cv2 preview window (costs a few ms/frame)")
-    ap.add_argument("--raw-steering", action="store_true",
-                     help="Bypass EMA smoothing and the deadzone - send the model's "
-                          "raw per-frame prediction straight to the servo")
+    ap.add_argument("--smooth-steering", dest="raw_steering", action="store_false", default=True,
+                     help="Use EMA smoothing + a deadzone instead of sending the model's raw "
+                          "per-frame prediction straight to the servo (default: raw)")
     ap.add_argument("--target-kmh", type=float, required=True,
                      help=f"Viteza tinta in km/h (0.1-{TARGET_SPEED_MAX_KMH:.0f})")
     ap.add_argument("--distance-m", type=float, required=True,

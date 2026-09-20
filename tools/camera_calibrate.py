@@ -3,7 +3,7 @@ RoboPacerV2 - Camera White Balance Calibration Tool
 ======================================================
 Live preview with the camera's current auto white-balance gains overlaid,
 plus a manual purple/magenta reduction filter for the leftover cast (the
-standard IMX219 tuning still doesn't fully neutralize it in some lighting).
+NoIR tuning doesn't fully neutralize it in some lighting).
 Point at a neutral white/grey card (plain white paper works) in the actual
 lighting you'll be recording in.
 
@@ -37,16 +37,16 @@ recording in - indoor-calibrated settings will look wrong outdoors and
 vice versa.
 """
 
+import os
+import sys
+
 import cv2
 import numpy as np
 
-from picamera2 import Picamera2
-
-TUNING_FILE = "/usr/share/libcamera/ipa/rpi/pisp/imx219.json"
-FRAME_SIZE = (640, 480)
-FRAME_FORMAT = "RGB888"
-FRAME_RATE = 120.0
-ANALOGUE_GAIN = 12.0  # match data_recorder.py's current daylight value
+# Camera configuration lives in camera_config.py (repo root), shared with
+# every other script so calibration matches what gets recorded and driven on.
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root
+from camera_config import make_camera
 
 PURPLE_STEP = 5
 PURPLE_OFFSET_LIMIT = 80
@@ -72,13 +72,7 @@ def apply_purple_reduction(frame, offset):
 
 
 def main():
-    tuning = Picamera2.load_tuning_file(TUNING_FILE)
-    picam2 = Picamera2(tuning=tuning)
-    config = picam2.create_video_configuration(
-        main={"size": FRAME_SIZE, "format": FRAME_FORMAT},
-        controls={"FrameRate": FRAME_RATE, "AnalogueGain": ANALOGUE_GAIN, "AwbEnable": True},
-    )
-    picam2.configure(config)
+    picam2 = make_camera(extra_controls={"AwbEnable": True})
     picam2.start()
 
     print(__doc__)

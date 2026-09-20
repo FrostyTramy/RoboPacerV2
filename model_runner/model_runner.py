@@ -28,10 +28,11 @@ are zero or more than one, this refuses to start (see find_hef_path()) -
 ambiguity about which model is driving the car is not something to guess
 at.
 
-Camera and hardware configuration (servo/ESC channels, pulse ranges,
-camera resolution/format/framerate/gain/tuning file) are copied 1:1 from
-data_recorder/data_recorder.py, since the model was trained on exactly
-what that script captures - any mismatch here would mean the model sees
+Camera configuration (resolution/sensor mode/format/framerate/gain/tuning
+file) comes from camera_config.py at the repo root, shared with
+data_recorder/data_recorder.py; hardware configuration (servo/ESC channels,
+pulse ranges) is copied 1:1 from it. The model was trained on exactly what
+that script captures - any mismatch here would mean the model sees
 something different at inference time than it did during training.
 
 --------------------------------------------------------------------------
@@ -85,6 +86,7 @@ import os
 import select
 import signal
 import socket
+import sys
 import time
 from collections import deque
 
@@ -95,7 +97,6 @@ import numpy as np
 from adafruit_motor import servo as adafruit_servo
 from adafruit_pca9685 import PCA9685
 from evdev import InputDevice, ecodes, list_devices
-from picamera2 import Picamera2
 from hailo_platform import (
     VDevice, HEF, FormatType, InferVStreams,
     InputVStreamParams, OutputVStreamParams,
@@ -118,14 +119,12 @@ for noisy in ("picamera2", "libcamera", "PIL"):
     logging.getLogger(noisy).setLevel(logging.CRITICAL)
 
 # ---------------------------------------------------------------------------
-# Camera - identical configuration to data_recorder/data_recorder.py, so
-# the model sees exactly what it was trained on.
+# Camera - configuration lives in camera_config.py (repo root), shared with
+# data_recorder/data_recorder.py, so the model sees exactly what it was
+# trained on.
 # ---------------------------------------------------------------------------
-TUNING_FILE = "/usr/share/libcamera/ipa/rpi/pisp/imx219_noir.json"
-FRAME_SIZE = (640, 480)
-FRAME_FORMAT = "RGB888"
-FRAME_RATE = 120.0
-ANALOGUE_GAIN = 12.0
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root
+from camera_config import make_camera
 
 # ---------------------------------------------------------------------------
 # Steering (servo on PCA9685 channel 0) - identical to data_recorder.py
@@ -297,17 +296,6 @@ def find_xbox_controller():
     return None
 
 
-def make_camera():
-    tuning = Picamera2.load_tuning_file(TUNING_FILE)
-    picam2 = Picamera2(tuning=tuning)
-    config = picam2.create_video_configuration(
-        main={"size": FRAME_SIZE, "format": FRAME_FORMAT},
-        controls={"FrameRate": FRAME_RATE, "AnalogueGain": ANALOGUE_GAIN},
-    )
-    picam2.configure(config)
-    return picam2
-
-
 def preprocess(frame_bgr):
     """
     frame_bgr comes from picamera2 in "RGB888" format, which is actually
@@ -326,6 +314,23 @@ def preprocess(frame_bgr):
     img = img.astype(np.float32) / 255.0
     img = (img - IMAGENET_MEAN) / IMAGENET_STD
     return img  # HWC, RGB, normalized (batch dim added after frame-stacking)
+
+
+def model_input_view(stack, frame_stack_n):
+    """BGR uint8 image of exactly what the model is fed (--display only):
+    the preprocessed 224x224 tensor, de-normalized back to pixels, one tile
+    per stacked frame side by side (current frame first). Pixel-exact - the
+    only change is nearest-neighbour upscaling for a single-frame model so
+    the tiny image is easier to see."""
+    tiles = []
+    for k in range(frame_stack_n):
+        rgb = stack[:, :, 3 * k:3 * k + 3] * IMAGENET_STD + IMAGENET_MEAN
+        tiles.append(np.clip(rgb * 255.0, 0, 255).astype(np.uint8)[:, :, ::-1])
+    view = np.hstack(tiles)
+    scale = 2 if frame_stack_n == 1 else 1
+    if scale > 1:
+        view = cv2.resize(view, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
+    return view
 
 
 def build_frame_stack(history, now, frame_stack_n=FRAME_STACK_N):
@@ -560,6 +565,10 @@ def main():
                                 cv2.putText(display, f"FPS: {current_fps:.1f}", (10, display.shape[0] - 10),
                                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2, cv2.LINE_AA)
                                 cv2.imshow("RoboPacerV2 - Autonomous Drive", display)
+                                cv2.imshow("Model input 224x224 (exact ce vede modelul)",
+                                           model_input_view(stack, frame_stack_n))
+                                if frame_counter == DISPLAY_EVERY_N_FRAMES:  # first draw only
+                                    cv2.moveWindow("Model input 224x224 (exact ce vede modelul)", 670, 0)
 
                                 if cv2.waitKey(1) & 0xFF == ord("q"):
                                     raise KeyboardInterrupt

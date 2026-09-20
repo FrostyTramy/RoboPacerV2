@@ -5,7 +5,7 @@
 | Item | Value |
 |---|---|
 | Sensor | IMX219 (Raspberry Pi Camera Module 2, NoIR variant) |
-| Tuning file | `imx219_noir.json` (`data_recorder.py`) / `imx219.json` (`camera.py`, `tools/camera_calibrate.py` — non-NoIR tuning is being trialed there only, see Notes) |
+| Tuning file | `imx219_noir.json`, for every script (set once in `camera_config.py`) |
 | Field of view | 62.2° horizontal × 48.8° vertical (~72.4° diagonal) |
 | Inference accelerator | Hailo AI Kit, 26 TOPS — tested at up to 400 fps for the trained model |
 
@@ -13,12 +13,13 @@
 
 | Setting | Value | Used in |
 |---|---|---|
-| Resolution | 640×480 | `camera/camera.py`, `data_recorder/data_recorder.py` |
+| Resolution | 640×480 | `camera/camera.py`, `data_recorder/data_recorder.py`, `main/main.py`, `model_runner/model_runner.py`, `tools/camera_calibrate.py` |
+| Sensor mode | 1640×1232, 8-bit (full field of view, 2×2 binned, `sensor={"output_size": (1640, 1232), "bit_depth": 8}`) — the ISP downscales it to 640×480. Without this, picamera2 picks the 640×480 sensor mode, which is a ~2.5× zoomed centre crop | same |
 | Pixel format | RGB888 | same |
-| Frame rate | 120 fps | same |
-| Analogue gain | 16.0 (`camera.py`) / 12.0 (`data_recorder.py`, reduced for outdoor daylight) | — |
+| Frame rate | 120 fps requested, ~84 fps actual (1640×1232 8-bit mode caps at 83.7 fps) | same |
+| Analogue gain | 12.0 (16.0 reduced 25% for outdoor daylight) | same |
 
-Resolution, format, and frame rate are set identically in both scripts via `create_video_configuration(main={"size": (640, 480), "format": "RGB888"}, controls={...})`. Tuning file and analogue gain currently differ between the two (see table) — reconcile once the `camera.py` color calibration work below is finalized.
+**Single source of truth: `camera_config.py` (repo root).** Every script builds its camera through `make_camera()` there, so the tuning file, resolution, sensor mode, pixel format, frame rate and gain are identical everywhere. To change any camera setting, edit that file only — never re-declare them in an individual script. Changing them invalidates existing recorded data and trained models.
 
 ## Training dataset frame size
 
@@ -50,4 +51,4 @@ Operating speed range is 10–30 km/h (2.78–8.33 m/s). Total system latency (c
 
 - Hailo inference throughput (400 fps tested) is well above what the pipeline needs — the camera is capped at 120 fps and the servo's mechanical slew rate is the actual bottleneck. Faster inference will not meaningfully change the required look-ahead distance; a faster-slewing servo would.
 - If the mount height or near-field blind distance change (different chassis, camera bracket, etc.), recheck the 4m calibration with the wall test described above.
-- The NoIR sensor produces a purple/pink cast outdoors in daylight (vegetation reflects strongly in near-IR, and NoIR has no filter to block it before the sensor — confirmed even blacks were tinted, which auto-white-balance calibration cannot correct since it's an additive IR contamination, not a gain mismatch). Trialing a swap to the standard (IR-cut) IMX219 tuning in `camera.py` and `tools/camera_calibrate.py` only, to work out the right settings before touching `data_recorder.py` (still on NoIR tuning). If night operation with IR illumination is needed later, that requires a second NoIR module or a switchable IR-cut filter.
+- The NoIR sensor produces a purple/pink cast outdoors in daylight (vegetation reflects strongly in near-IR, and NoIR has no filter to block it before the sensor — confirmed even blacks were tinted, which auto-white-balance calibration cannot correct since it's an additive IR contamination, not a gain mismatch). A trial of the standard (IR-cut) IMX219 tuning in `camera.py` and `tools/camera_calibrate.py` was ended — all scripts are back on the NoIR tuning so they match. If night operation with IR illumination is needed later, that requires a second NoIR module or a switchable IR-cut filter.

@@ -10,7 +10,7 @@
     <a href="/">&larr; RoboPacer</a>
     <h1>{{ script.name }}</h1>
 
-    {% if script.flags %}
+    {% if script.flags and script.id != "main" %}
     <div class="flags" id="flags-box">
         {% for f in script.flags %}
         <label class="flag-option">
@@ -36,7 +36,19 @@
         <label class="field-label">Distanta tinta (m)
             <input type="number" class="field-input" id="mn-distance-input" min="1" max="50000" step="1" placeholder="500" inputmode="numeric">
         </label>
+        <label class="flag-option">
+            <input type="checkbox" id="mn-raw-steering-checkbox" checked>
+            Raw steering (exact ce da modelul, fara smoothing/deadzone)
+        </label>
         <div class="error-text" id="mn-config-error"></div>
+    </div>
+    {% endif %}
+
+    {% if script.dataset_picker %}
+    <div class="field-group" id="dataset-box">
+        <div class="field-label">Folder date</div>
+        <div class="dataset-list" id="dataset-list"></div>
+        <div class="error-text" id="dataset-error"></div>
     </div>
     {% endif %}
 
@@ -181,12 +193,70 @@
             return {target_kmh: kmh, distance_m: dist};
         }
 
+        // Data Recorder: lista folderelor din data_recorder/ care au deja
+        // cadre, plus "Folder nou" (gol). Alegerea se trimite la Start;
+        // recorder-ul continua de la ultimul frame din folderul ales.
+        const DATASET_NEW = "__new__";
+
+        function loadDatasets() {
+            const list = document.getElementById("dataset-list");
+            const errEl = document.getElementById("dataset-error");
+            fetch("/api/data_recorder/datasets").then(r => r.json()).then(data => {
+                // Pastreaza alegerea curenta cand lista se reimprospateaza
+                // (ex: dupa ce o rulare s-a oprit), daca folderul mai exista.
+                const checked = list.querySelector("input:checked");
+                const previous = checked ? checked.value : DATASET_NEW;
+                const entries = [{value: DATASET_NEW, text: "Folder nou (gol)"}].concat(
+                    data.datasets.map(d => ({
+                        value: d.name,
+                        text: d.name + " \u2013 " + d.frames + " cadre, continua de la frame_" +
+                              String(d.last_index + 1).padStart(5, "0"),
+                    })));
+                const selected = entries.some(e => e.value === previous) ? previous : DATASET_NEW;
+                list.replaceChildren(...entries.map(e => {
+                    const label = document.createElement("label");
+                    label.className = "flag-option";
+                    const input = document.createElement("input");
+                    input.type = "radio";
+                    input.name = "dataset";
+                    input.className = "dataset-radio";
+                    input.value = e.value;
+                    input.checked = e.value === selected;
+                    input.disabled = recorderRunning;
+                    label.append(input, " " + e.text);
+                    return label;
+                }));
+                errEl.textContent = "";
+            }).catch(() => { errEl.textContent = "Nu am putut citi lista de foldere."; });
+        }
+
+        function selectedDataset() {
+            const checked = document.querySelector(".dataset-radio:checked");
+            if (!checked) return null;
+            return checked.value === DATASET_NEW
+                ? {mode: "new"}
+                : {mode: "existing", name: checked.value};
+        }
+
         function start(force) {
             const body = {id: scriptId, force: force, args: selectedArgs()};
+            if (scriptId === "data_recorder") {
+                body.dataset = selectedDataset();
+                if (!body.dataset) {
+                    document.getElementById("dataset-error").textContent = "Alege un folder.";
+                    return;
+                }
+            }
             if (scriptId === "main") {
                 const params = validateMainConfig();
                 if (!params) return;
                 body.params = params;
+                // Raw e implicit in main.py insusi - checkbox-ul e bifat
+                // din start ca sa reflecte asta; doar cand il debifezi
+                // trimitem explicit flag-ul care cere modul neted.
+                if (!document.getElementById("mn-raw-steering-checkbox").checked) {
+                    body.args = [...body.args, "--smooth-steering"];
+                }
             }
             fetch("/api/start", {
                 method: "POST",
@@ -300,6 +370,8 @@
             btn.textContent = collapsed ? "Arata logurile" : "Ascunde logurile";
         }
 
+        let recorderRunning = false;
+
         function applyStatus(payload) {
             const running = payload.running;
             const isThisRunning = running && running.id === scriptId;
@@ -307,6 +379,14 @@
             document.getElementById("btn-start").style.display = isThisRunning ? "none" : "inline-block";
             document.getElementById("btn-stop").style.display = isThisRunning ? "inline-block" : "none";
             document.querySelectorAll(".flag-checkbox").forEach(c => { c.disabled = isThisRunning; });
+            if (scriptId === "data_recorder") {
+                const justStopped = recorderRunning && !isThisRunning;
+                recorderRunning = !!isThisRunning;
+                document.querySelectorAll(".dataset-radio").forEach(c => { c.disabled = recorderRunning; });
+                // Cadrele inregistrate abia acum apar (folder nou sau numar/
+                // ultim frame actualizate) - reciteste lista.
+                if (justStopped) loadDatasets();
+            }
 
             if (isThisRunning) {
                 badge.textContent = "ruleaza (PID " + running.pid + ", " + Math.floor(running.uptime_seconds) + "s)";
@@ -358,6 +438,7 @@
         openLogStream();
         if (scriptId === "manual_drive") startTelemetryPolling();
         if (scriptId === "cruise_control") startCruiseTelemetryPolling();
+        if (scriptId === "data_recorder") loadDatasets();
         if (scriptId === "main") {
             loadMainModelInfo();
             startMainTelemetryPolling();

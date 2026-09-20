@@ -6,6 +6,9 @@
     "params": [
       {"name": "target_kmh", "flag": "--target-kmh", "type": "float", "min": 0.1, "max": 100},
       {"name": "distance_m", "flag": "--distance-m", "type": "float", "min": 1, "max": 50000}
+    ],
+    "flags": [
+      {"flag": "--smooth-steering", "label": "Steering neted (EMA+deadzone) in loc de raw"}
     ]
   },
   {
@@ -21,6 +24,7 @@
     "id": "data_recorder",
     "name": "Data Recorder",
     "path": "/home/pi/RoboPacerV2/data_recorder/data_recorder.py",
+    "dataset_picker": true,
     "flags": [
       {"flag": "--legacy", "label": "Format clasic (fara timestamp)"},
       {"flag": "--display", "label": "Fereastra preview (cv2)"}

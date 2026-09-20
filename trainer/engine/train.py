@@ -64,7 +64,7 @@ MODELS_DIR = ROOT_DIR / "models"
 
 # ── Preprocessing - must match main.py's preprocess() exactly ─────────────
 
-def load_and_preprocess(path, flip=False, brightness=1.0):
+def load_and_preprocess(path, flip=False, brightness=1.0, cache=None):
     """
     data_recorder.py on the Pi saves frames straight from the camera's
     capture_array() with no channel conversion; that array is BGR-ordered
@@ -74,17 +74,33 @@ def load_and_preprocess(path, flip=False, brightness=1.0):
     back that same BGR order - flip it to RGB exactly like main.py flips
     its own raw capture array, so both sides land on the same channel
     order before resize/normalize.
+
+    cache (optional): dict of {str(path): decoded+resized RGB uint8 array},
+    pre-populated by _preload_frames_to_ram(). When given and it already
+    has this path, skips disk I/O and JPEG decode entirely - flip/
+    brightness/normalize (cheap, per-sample augmentation) still run fresh
+    below since those vary per __getitem__ call and can't be cached.
+    Resize is moved ahead of flip/brightness here (vs. imread->flip->
+    brightness->resize before) so the cached array is already
+    augmentation-free; this doesn't change the flip=False, brightness=1.0
+    path (still imread->RGB->resize->normalize) that main.py must match.
     """
-    img_bgr = cv2.imread(str(path))
-    if img_bgr is None:
-        raise FileNotFoundError(f"Could not read image: {path}")
-    img_rgb = img_bgr[:, :, ::-1]
+    key = str(path)
+    if cache is not None and key in cache:
+        img_rgb = cache[key]
+    else:
+        img_bgr = cv2.imread(key)
+        if img_bgr is None:
+            raise FileNotFoundError(f"Could not read image: {path}")
+        img_rgb = img_bgr[:, :, ::-1]
+        img_rgb = cv2.resize(img_rgb, (IMG_SIZE, IMG_SIZE), interpolation=cv2.INTER_LINEAR)
+        if cache is not None:
+            cache[key] = img_rgb
     if flip:
         img_rgb = img_rgb[:, ::-1, :]
     if brightness != 1.0:
         img_rgb = np.clip(img_rgb.astype(np.float32) * brightness, 0, 255).astype(np.uint8)
-    img = cv2.resize(img_rgb, (IMG_SIZE, IMG_SIZE), interpolation=cv2.INTER_LINEAR)
-    img = img.astype(np.float32) / 255.0
+    img = img_rgb.astype(np.float32) / 255.0
     img = (img - IMAGENET_MEAN) / IMAGENET_STD
     return img  # HWC float32, RGB, normalized
 
@@ -192,13 +208,57 @@ def _chunk_indices_by_count(records_sorted, block_frames=CLASSIC_SPLIT_BLOCK_FRA
             for i in range(0, len(records_sorted), block_frames)]
 
 
-def _load_stack(records_sorted, idx, data_root, flip=False, brightness=1.0, n=FRAME_STACK_N):
+def _load_stack(records_sorted, idx, data_root, flip=False, brightness=1.0, n=FRAME_STACK_N, cache=None):
     indices = _history_indices(records_sorted, idx, n=n)
     frames = [
-        load_and_preprocess(data_root / records_sorted[i]["image_path"], flip=flip, brightness=brightness)
+        load_and_preprocess(data_root / records_sorted[i]["image_path"], flip=flip, brightness=brightness, cache=cache)
         for i in indices
     ]
     return np.concatenate(frames, axis=-1)  # H, W, 3 * n
+
+
+# ── RAM frame cache (--a100 only) ──────────────────────────────────────
+# Frame-stacking means each image is read again as "history" by several
+# nearby samples, and WeightedRandomSampler re-reads rare-angle frames many
+# times per epoch on top of that - on a 151k-image dataset this makes
+# training disk-I/O-bound rather than GPU-bound (observed: A100 sitting at
+# 0-4% util while CPU wasn't even saturated). Decoding every unique frame
+# once into RAM up front removes disk I/O from the hot loop entirely.
+# Threaded (not multiprocessed) because cv2.imread/resize are C++ calls
+# that release the GIL, so threads still get real parallelism here; and
+# because this dict is built in the main process *before* DataLoader
+# workers fork, so on Linux (RunPod) copy-on-write means all workers share
+# the one in-memory copy instead of duplicating it per worker.
+def _preload_frames_to_ram(records, data_root, push, max_workers=16):
+    from concurrent.futures import ThreadPoolExecutor
+
+    paths = sorted({r["image_path"] for r in records})
+    push({"type": "log", "level": "info",
+          "text": f"Preloading {len(paths)} unique frames into RAM (--a100)..."})
+
+    def _decode(rel_path):
+        full = str(data_root / rel_path)
+        img_bgr = cv2.imread(full)
+        if img_bgr is None:
+            raise FileNotFoundError(f"Could not read image: {full}")
+        img_rgb = img_bgr[:, :, ::-1]
+        img_rgb = cv2.resize(img_rgb, (IMG_SIZE, IMG_SIZE), interpolation=cv2.INTER_LINEAR)
+        return full, np.ascontiguousarray(img_rgb)
+
+    cache = {}
+    done = 0
+    log_step = max(1, len(paths) // 20)
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        for full, img in ex.map(_decode, paths):
+            cache[full] = img
+            done += 1
+            if done % log_step == 0 or done == len(paths):
+                push({"type": "log", "level": "info", "text": f"  preloaded {done}/{len(paths)} frames"})
+
+    mb = sum(a.nbytes for a in cache.values()) / (1024 * 1024)
+    push({"type": "log", "level": "success",
+          "text": f"Preload done: {len(cache)} frames cached in RAM (~{mb/1024:.1f} GB)."})
+    return cache
 
 
 # ── Dataset ─────────────────────────────────────────────────────────────
@@ -212,12 +272,14 @@ class SteeringDataset(Dataset):
     of those records are actually this split's targets.
     """
 
-    def __init__(self, records_sorted, sample_indices, data_root, augment=False, frame_stack_n=FRAME_STACK_N):
+    def __init__(self, records_sorted, sample_indices, data_root, augment=False, frame_stack_n=FRAME_STACK_N,
+                 cache=None):
         self.records_sorted = records_sorted
         self.sample_indices = sample_indices
         self.data_root = Path(data_root)
         self.augment = augment
         self.frame_stack_n = frame_stack_n
+        self.cache = cache
 
     def __len__(self):
         return len(self.sample_indices)
@@ -233,7 +295,7 @@ class SteeringDataset(Dataset):
             angle = -angle
 
         stack = _load_stack(self.records_sorted, idx, self.data_root, flip=flip, brightness=brightness,
-                             n=self.frame_stack_n)
+                             n=self.frame_stack_n, cache=self.cache)
         tensor = torch.from_numpy(stack.transpose(2, 0, 1).copy())  # HWC -> CHW
         return tensor, torch.tensor(angle, dtype=torch.float32)
 
@@ -537,7 +599,7 @@ def run(config, push=None, should_stop=None):
         json_path = json_path / "driving_log.json"
     model_name = config.get("model_name", "model").strip() or "model"
     epochs = int(config.get("epochs", 20))
-    batch_size = int(config.get("batch_size") or (128 if config.get("a100") else 32))
+    batch_size = int(config.get("batch_size") or (512 if config.get("a100") else 32))
     MODELS_DIR.mkdir(exist_ok=True)
 
     if not json_path.exists():
@@ -597,26 +659,43 @@ def run(config, push=None, should_stop=None):
         # else: leftover chunks held out, unused - same as before
     push({"type": "split", "train": len(train_idx), "val": len(val_idx), "total": len(records_sorted)})
 
+    cache = _preload_frames_to_ram(records, data_root, push) if config.get("a100") else None
+
     train_weights = _balanced_sample_weights(records_sorted, train_idx)
     train_sampler = WeightedRandomSampler(train_weights, num_samples=len(train_idx), replacement=True)
-    num_workers = 4 if config.get("a100") else 0
+    num_workers = 12 if config.get("a100") else 0
     pin_memory = use_amp
-    train_ld = DataLoader(SteeringDataset(records_sorted, train_idx, data_root, augment=True, frame_stack_n=frame_stack_n),
+    extra_kwargs = {"prefetch_factor": 4} if num_workers > 0 else {}
+    train_ld = DataLoader(SteeringDataset(records_sorted, train_idx, data_root, augment=True, frame_stack_n=frame_stack_n,
+                                           cache=cache),
                            batch_size=batch_size, sampler=train_sampler, num_workers=num_workers,
-                           persistent_workers=num_workers > 0, pin_memory=pin_memory)
-    val_ld = DataLoader(SteeringDataset(records_sorted, val_idx, data_root, augment=False, frame_stack_n=frame_stack_n),
+                           persistent_workers=num_workers > 0, pin_memory=pin_memory, **extra_kwargs)
+    val_ld = DataLoader(SteeringDataset(records_sorted, val_idx, data_root, augment=False, frame_stack_n=frame_stack_n,
+                                         cache=cache),
                          batch_size=batch_size, shuffle=False, num_workers=num_workers,
-                         persistent_workers=num_workers > 0, pin_memory=pin_memory)
+                         persistent_workers=num_workers > 0, pin_memory=pin_memory, **extra_kwargs)
 
     model = build_model(frame_stack_n).to(device)
+    train_model = model
+    if config.get("a100") and device.type == "cuda":
+        # Fuses/compiles the training graph for this fixed input shape - a
+        # meaningful speedup for a model this small, where kernel-launch
+        # overhead otherwise limits how much of the A100 actually gets used.
+        # `model` (uncompiled) stays the checkpoint/export target below, so
+        # this can't affect the saved .pth's state_dict keys or ONNX export.
+        try:
+            train_model = torch.compile(model)
+            push({"type": "log", "level": "info", "text": "torch.compile enabled for training."})
+        except Exception as e:
+            push({"type": "log", "level": "warning", "text": f"torch.compile unavailable, continuing without it: {e}"})
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
     best_val = float("inf")
     ckpt_path = MODELS_DIR / f"{model_name}.pth"
 
     for epoch in range(1, epochs + 1):
-        train_loss = _train_epoch(model, train_ld, optimizer, device, push, epoch, epochs, use_amp=use_amp)
-        val_loss = _eval_epoch(model, val_ld, device, use_amp=use_amp)
+        train_loss = _train_epoch(train_model, train_ld, optimizer, device, push, epoch, epochs, use_amp=use_amp)
+        val_loss = _eval_epoch(train_model, val_ld, device, use_amp=use_amp)
         scheduler.step()
         is_best = val_loss < best_val
         if is_best:
@@ -799,7 +878,9 @@ if __name__ == "__main__":
     p.add_argument("--epochs", type=int, default=20)
     p.add_argument("--batch-size", type=int, default=None)
     p.add_argument("--pth-only", action="store_true", help="Stop after saving .pth, skip ONNX/HEF compile")
-    p.add_argument("--a100", action="store_true", help="Enable A100 optimizations: BF16 AMP, num_workers=4, batch 128, pin_memory, cudnn.benchmark")
+    p.add_argument("--a100", action="store_true",
+                    help="Enable A100 optimizations: RAM frame cache, BF16 AMP, torch.compile, "
+                         "num_workers=12, batch 512, pin_memory, cudnn.benchmark")
     args = p.parse_args()
     run({"json_path": args.json, "model_name": args.name,
          "epochs": args.epochs, "batch_size": args.batch_size,

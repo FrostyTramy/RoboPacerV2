@@ -376,7 +376,7 @@ def _train_epoch(model, loader, optimizer, device, push, epoch, epochs, use_amp=
         if (i + 1) % log_step == 0:
             push({"type": "log", "level": "info",
                   "text": f"  epoch {epoch}/{epochs}  batch {i+1}/{n}  loss={total/samples:.5f}"})
-    return total / len(loader.dataset)
+    return total / samples
 
 
 @torch.no_grad()

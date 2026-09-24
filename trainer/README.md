@@ -8,11 +8,51 @@ cruise-control speed) on the Pi run the resulting `.hef` - both run the
 exact same inference/preprocessing code, just drop the `.hef` next to
 whichever one you're using.
 
-For setup and how to run it (Windows web UI, RunPod/A100 cloud training,
-troubleshooting), see **[INSTALL.md](INSTALL.md)**. The rest of this file
-covers the *why* behind the training approach - dataset format detection,
-class imbalance handling, and preprocessing parity - which doesn't change
-regardless of where or how you run it.
+## Setup
+
+1. `pip install -r requirements.txt` (or just run `start.bat`, it does this for you)
+2. Get `hailo_dataflow_compiler-3.34.0-py3-none-linux_x86_64.whl` from the
+   [Hailo Developer Zone](https://hailo.ai/developer-zone/) (free account
+   required) and place it at `engine/compile/resources/hailo_dataflow_compiler-3.34.0-py3-none-linux_x86_64.whl`
+3. Install Docker Desktop, make sure it's running
+4. Copy the dataset folder from the Pi (`data_recorder/set1/`, containing
+   `driving_log.json` + `frames/`) onto this machine
+
+## Run
+
+```
+start.bat
+```
+
+Open `http://localhost:5000`, point it at your dataset folder (e.g.
+`set1`, or the `driving_log.json` inside it directly - both work), set a
+model name / epochs / batch size, click Start. Training runs natively
+(GPU if available); the final HEF compile step runs inside the
+`hailo-dfc` Docker container. Output lands in `models/<name>.hef` (plus
+`.pth` checkpoint).
+
+Copy the `.hef` onto the Pi, into `main/` (next to `main.py`) and/or
+`model_runner/` (next to `model_runner.py`) - exactly one `.hef` file must
+be in whichever folder you're running from.
+
+Training checks Docker + the DFC wheel are in place *before* starting -
+not after - so a missing wheel or a stopped Docker Desktop fails in a
+second instead of after a multi-hour training run.
+
+## Before a real (multi-hour) training run
+
+Click **"Test export (0 epochs)"** first - it runs an untrained model
+through the exact same ONNX export + Docker + Hailo DFC compile pipeline,
+in seconds. If your Docker/wheel/DFC setup is broken, this is where
+you'll find out - not after hours of training. It writes to
+`models/smoketest.*` and never touches your real named models.
+
+## If the HEF compile step fails after training already finished
+
+Training already saved `models/<name>.pth` and `.onnx` - you do not need
+to retrain. Fix whatever Docker/DFC issue caused the failure, then click
+**"Retry compile (no retrain)"** with the same model name - it recompiles
+straight from the existing `.onnx` and calibration data.
 
 ## Dataset format: classic vs timestamped (frame-stacked)
 
@@ -31,7 +71,7 @@ regardless of where or how you run it.
 You don't need to tell the trainer or the Pi-side scripts which one you
 used - they all detect it automatically:
 
-- `engine/train_core.py` checks whether the dataset's records have a
+- `engine/train.py` checks whether the dataset's records have a
   `timestamp` field and picks single-frame vs frame-stacked training
   accordingly (adjusting the model's input channels, export shape, and
   calibration data to match). A dataset that mixes both formats (e.g.
@@ -60,7 +100,7 @@ the gradient, and the model converges to predicting near-zero for
 almost everything (visibly: tiny, hesitant steering that won't commit
 to a real turn).
 
-`engine/train_core.py` counters this with a `WeightedRandomSampler` on the
+`engine/train.py` counters this with a `WeightedRandomSampler` on the
 training split only (validation keeps the true distribution, so val MSE
 stays a meaningful, comparable metric across runs): samples are bucketed
 by `|steering_angle|` and reweighted so each bucket contributes roughly
@@ -71,7 +111,7 @@ by the straight-driving majority.
 
 ## Why the preprocessing looks the way it does
 
-`engine/train_core.py`'s `load_and_preprocess()` / `SteeringDataset` intentionally
+`engine/train.py`'s `load_and_preprocess()` / `SteeringDataset` intentionally
 use `cv2.resize(..., INTER_LINEAR)` and manual normalization instead of
 `torchvision.transforms`, because that's exactly what the Pi-side scripts
 (`model_runner/model_runner.py`, `main/main.py`) do at inference time. If

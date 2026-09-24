@@ -44,7 +44,7 @@ done
 
 if [[ -n "$DRIVE_LINK" ]]; then
     echo "Downloading dataset from Google Drive..."
-    pip install -q gdown
+    pip install -q -U gdown
     ZIP_PATH="$SEARCH_ROOT/_drive_dataset.zip"
     DL_START=$(date +%s)
     gdown --fuzzy "$DRIVE_LINK" -O "$ZIP_PATH"

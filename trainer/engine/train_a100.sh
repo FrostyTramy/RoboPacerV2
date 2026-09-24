@@ -44,10 +44,10 @@ done
 
 if [[ -n "$DRIVE_LINK" ]]; then
     echo "Downloading dataset from Google Drive..."
-    pip install -q -U gdown
+    python3 -m pip install -q -U gdown
     ZIP_PATH="$SEARCH_ROOT/_drive_dataset.zip"
     DL_START=$(date +%s)
-    gdown --fuzzy "$DRIVE_LINK" -O "$ZIP_PATH"
+    python3 -m gdown --fuzzy "$DRIVE_LINK" -O "$ZIP_PATH"
     DL_SECONDS=$(( $(date +%s) - DL_START ))
     ZIP_BYTES=$(stat -c%s "$ZIP_PATH")
     ZIP_MB=$(( ZIP_BYTES / 1024 / 1024 ))

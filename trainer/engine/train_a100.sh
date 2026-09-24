@@ -46,7 +46,17 @@ if [[ -n "$DRIVE_LINK" ]]; then
     echo "Downloading dataset from Google Drive..."
     pip install -q gdown
     ZIP_PATH="$SEARCH_ROOT/_drive_dataset.zip"
+    DL_START=$(date +%s)
     gdown --fuzzy "$DRIVE_LINK" -O "$ZIP_PATH"
+    DL_SECONDS=$(( $(date +%s) - DL_START ))
+    ZIP_BYTES=$(stat -c%s "$ZIP_PATH")
+    ZIP_MB=$(( ZIP_BYTES / 1024 / 1024 ))
+    if [[ $DL_SECONDS -gt 0 ]]; then
+        SPEED_MBPS=$(( ZIP_BYTES * 8 / DL_SECONDS / 1000000 ))
+    else
+        SPEED_MBPS="a lot of"
+    fi
+    echo "Downloaded ${ZIP_MB}MB in ${DL_SECONDS}s (~${SPEED_MBPS} Mbps)"
     echo "Extracting..."
     unzip -q -o "$ZIP_PATH" -d "$SEARCH_ROOT"
     rm -f "$ZIP_PATH"

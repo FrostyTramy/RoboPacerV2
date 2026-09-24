@@ -47,12 +47,17 @@ done, it prints:
 
 ## Step 3 — Pull the `.pth` off the pod with WinSCP
 
-1. Open **WinSCP** → New Session.
-2. File protocol **SFTP**, host/port/username + password (or private key)
-   from RunPod's **Connect** panel.
-3. Login, browse to `/workspace/RoboPacerV2/trainer/models/` on the remote
-   (right) side.
-4. Drag `<name>.pth` and `<name>_calib_data_nhwc.npy` into `trainer/models/`
+Pods use key auth only — no password.
+
+1. Open **WinSCP** → New Site.
+2. File protocol **SFTP**. Enter the host/IP and port shown in RunPod's
+   **Connect** panel. User name: `root`. Leave password blank.
+3. **Advanced → SSH → Authentication → Private key file** → browse to the
+   key you already made (e.g. `C:\Users\<you>\.ssh\id_ed25519`). If WinSCP
+   offers to convert it to `.ppk`, accept.
+4. Login (accept the host key prompt on first connect). Browse to
+   `/workspace/RoboPacerV2/trainer/models/` on the remote (right) side.
+5. Drag `<name>.pth` and `<name>_calib_data_nhwc.npy` into `trainer/models/`
    on the local (left) side.
 
 ## Step 4 — Compile

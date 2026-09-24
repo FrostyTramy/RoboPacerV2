@@ -6,7 +6,19 @@ Zip your dataset (`driving_log.json` + `frames/` in one `.zip`), upload it
 to Google Drive, share it as **"Anyone with the link"** (public), and copy
 the link.
 
-## Step 1 — Clone + train (on the pod)
+## Step 1 — Configure the pod
+
+- **GPU:** 1x A100 (40GB is enough for this recipe's batch size; the 80GB
+  variant works too, it just costs more for no real benefit here).
+- **Template:** any RunPod PyTorch/CUDA template — comes with `torch`
+  preinstalled, so `train_a100.sh` doesn't have to redownload it.
+- **Container Disk:** ~20GB (OS + CUDA + Python deps).
+- **Volume Disk:** 50GB+, mounted at `/workspace`. This must be a
+  **persistent** network volume — it's the only thing that survives a pod
+  stop/terminate, and the cloned repo, dataset, and model outputs all live
+  here. Bump it up if your dataset zip is bigger than a few GB.
+
+## Step 2 — Clone + train (on the pod)
 
 Start tmux first so training survives a dropped connection:
 
@@ -33,7 +45,7 @@ done, it prints:
 /workspace/RoboPacerV2/trainer/models/<name>_calib_data_nhwc.npy
 ```
 
-## Step 2 — Pull the `.pth` off the pod with WinSCP
+## Step 3 — Pull the `.pth` off the pod with WinSCP
 
 1. Open **WinSCP** → New Session.
 2. File protocol **SFTP**, host/port/username + password (or private key)
@@ -43,7 +55,7 @@ done, it prints:
 4. Drag `<name>.pth` and `<name>_calib_data_nhwc.npy` into `trainer/models/`
    on the local (left) side.
 
-## Step 3 — Compile
+## Step 4 — Compile
 
 Run `trainer\engine\start.bat`, open `http://localhost:5000` → **Compile-only**,
 point it at the `.pth`. It auto-picks up the `.npy` sitting next to it. Out

@@ -45,9 +45,20 @@ done
 if [[ -n "$DRIVE_LINK" ]]; then
     echo "Downloading dataset from Google Drive..."
     python3 -m pip install -q -U gdown
+    # Extract the file ID ourselves instead of relying on --fuzzy, since some
+    # base images ship a gdown too old to have that flag (and stay that old
+    # even after "pip install -U" - a shadowed/duplicate install somewhere
+    # else in the Python path). A bare file ID works on every gdown version.
+    if [[ "$DRIVE_LINK" =~ /d/([a-zA-Z0-9_-]+) ]]; then
+        FILE_ID="${BASH_REMATCH[1]}"
+    elif [[ "$DRIVE_LINK" =~ id=([a-zA-Z0-9_-]+) ]]; then
+        FILE_ID="${BASH_REMATCH[1]}"
+    else
+        FILE_ID="$DRIVE_LINK"
+    fi
     ZIP_PATH="$SEARCH_ROOT/_drive_dataset.zip"
     DL_START=$(date +%s)
-    python3 -m gdown --fuzzy "$DRIVE_LINK" -O "$ZIP_PATH"
+    python3 -m gdown "$FILE_ID" -O "$ZIP_PATH"
     DL_SECONDS=$(( $(date +%s) - DL_START ))
     ZIP_BYTES=$(stat -c%s "$ZIP_PATH")
     ZIP_MB=$(( ZIP_BYTES / 1024 / 1024 ))

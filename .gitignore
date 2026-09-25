@@ -1,0 +1,54 @@
+# Models / compiled artifacts (main/main.py's .hef is supplied at deploy time)
+*.hef
+*.pth
+*.onnx
+*.har
+*.npy
+*.whl
+*.deb
+
+# Captured photos / video / datasets (large, personal, not code)
+*.jpg
+*.jpeg
+*.png
+*.mp4
+# ...except images that are part of the source
+!docs/images/*.jpg
+!docs/images/*.jpeg
+!docs/images/*.png
+!Esp32/ConnectIQ/resources/images/*.png
+data_recorder/*/
+set*/
+Pista-biciclete/
+PistaAtletism/
+PistaAtletism.zip
+trainer/models/
+trainer/engine/compile/resources/
+
+# Run output
+main/logs/
+manual_drive/speed_logs/
+dashboard/run_logs/
+*.log
+
+# Garmin ConnectIQ - build artifacts (sursa merge pe github, astea nu)
+Esp32/ConnectIQ/bin/
+Esp32/ConnectIQ/gen/
+Esp32/ConnectIQ/internal-mir/
+Esp32/ConnectIQ/mir/
+Esp32/ConnectIQ/*.iq
+Esp32/ConnectIQ/*.prg
+Esp32/ConnectIQ/*.prg.debug.xml
+
+# Secrete - nu merge pe github
+Esp32/garmin_receiver/secrets.h
+Esp32/ConnectIQ/source/Secrets.mc
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS / editor cruft
+.DS_Store

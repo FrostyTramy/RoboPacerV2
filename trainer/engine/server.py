@@ -203,14 +203,17 @@ def run_full():
     def job():
         import train_core
         import compile_pipeline
+        # Before training, not after - a stopped Docker / missing wheel should
+        # fail in a second, not after hours of training (same as main's train.py).
+        if not compile_pipeline.check_compile_prereqs(_push):
+            _push({"type": "done"})
+            return
         ok = train_core.run(config, _push, _should_stop, emit_done=False)
         if not ok:
             _push({"type": "done"})
             return
-        if _should_stop():
-            _push({"type": "log", "level": "warning", "text": "Stopped before compile step."})
-            _push({"type": "done"})
-            return
+        # Stop only ends training early - the best checkpoint so far is still
+        # exported + compiled, same as main's train.py.
         model_name = (config.get("model_name") or "model").strip() or "model"
         compile_pipeline.compile_from_pth({
             "pth_path": str(train_core.MODELS_DIR / f"{model_name}.pth"),

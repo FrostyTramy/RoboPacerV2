@@ -1,0 +1,47 @@
+{% extends "run_base.html" %}
+
+{% block config %}
+  <div class="status-line">
+    Condus manual cu controller-ul (stick = steering, triggere = gaz/frana), fara inregistrare.
+    [Y] pauza, [A] reia, [B] opreste.
+  </div>
+{% endblock %}
+
+{% block live %}
+  <h2>
+    Live
+    <span class="toggle-link" id="reset-distance">(reseteaza distanta)</span>
+  </h2>
+  <div class="grid">
+    <div class="card"><div class="label">Stare</div><div class="value" id="md-state">--</div></div>
+    <div class="card"><div class="label">km/h</div><div class="value" id="md-kmh">--</div></div>
+    <div class="card"><div class="label">Pace</div><div class="value" id="md-pace">--</div></div>
+    <div class="card"><div class="label">Distanta</div><div class="value" id="md-distance">--</div></div>
+    <div class="card"><div class="label">Medie</div><div class="value" id="md-avg">--</div></div>
+    <div class="card"><div class="label">Maxim</div><div class="value" id="md-max">--</div></div>
+  </div>
+{% endblock %}
+
+{% block page_script %}
+<script>
+  function fmtSpeed(kmh, pace) {
+    return kmh != null ? `${kmh.toFixed(1)} km/h · ${pace}/km` : '--';
+  }
+
+  function pollLive() {
+    fetch('/api/manual_drive/status').then(r => r.json()).then(t => {
+      document.getElementById('md-state').innerHTML = t.paused == null ? '--'
+        : (t.paused ? '<span class="badge warn">pauza</span>' : '<span class="badge ok">activ</span>');
+      document.getElementById('md-kmh').textContent = t.kmh != null ? t.kmh.toFixed(2) : '--';
+      document.getElementById('md-pace').textContent = t.pace != null ? t.pace + '/km' : '--:--';
+      document.getElementById('md-distance').textContent = t.distance_m != null ? t.distance_m.toFixed(0) + 'm' : '--';
+      document.getElementById('md-avg').textContent = fmtSpeed(t.avg_kmh, t.avg_pace);
+      document.getElementById('md-max').textContent = fmtSpeed(t.max_kmh, t.max_pace);
+    });
+  }
+
+  document.getElementById('reset-distance').addEventListener('click', () => {
+    fetch('/api/manual_drive/reset_distance', { method: 'POST' }).then(pollLive);
+  });
+</script>
+{% endblock %}

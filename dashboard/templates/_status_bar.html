@@ -1,0 +1,100 @@
+<!--
+  Shared on every page: relay state + OFF, which script is running + Stop.
+  Fed by /api/stream/status (1s). A page can define onStatus(payload) to
+  react to the same data (stats cards, hiding its Start form, ...).
+
+  No relay ON button on purpose: each script turns the relay on itself at
+  Start, after the ESC's neutral signal is already running (see /api/relay).
+-->
+<div class="status-bar" id="status-bar">
+  <div class="status-bar-row">
+    <span class="label">Releu</span>
+    <span class="badge muted" id="sb-relay">--</span>
+    <button class="btn small danger" id="sb-relay-off">Opreste releu</button>
+  </div>
+  <div class="status-line muted-text">Releul porneste singur la Start (dupa ce ESC-ul primeste semnal neutru).
+    Opreste releu = taie curentul si opreste scriptul care ruleaza.</div>
+  <div class="status-bar-row">
+    <span class="label">Script</span>
+    <span id="sb-running">--</span>
+    <button class="btn small danger hidden" id="sb-stop">Stop</button>
+  </div>
+  <div class="status-line error-text" id="sb-error"></div>
+</div>
+
+<script>
+  // SSIDs, device names, script output come from outside - never put them
+  // into innerHTML raw (a nearby AP can name itself "<img onerror=...>").
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[c]));
+  }
+
+  (function () {
+    const relayEl = document.getElementById('sb-relay');
+    const runningEl = document.getElementById('sb-running');
+    const stopBtn = document.getElementById('sb-stop');
+    const relayOffBtn = document.getElementById('sb-relay-off');
+    const errEl = document.getElementById('sb-error');
+
+    function render(payload) {
+      const esp32 = (payload.stats && payload.stats.esp32) || {};
+      if (!esp32.service_running) {
+        relayEl.className = 'badge bad';
+        relayEl.textContent = 'estop_listener oprit';
+      } else if (!esp32.esp32_connected) {
+        relayEl.className = 'badge bad';
+        relayEl.textContent = 'ESP32 deconectat';
+      } else {
+        relayEl.className = 'badge ' + (esp32.relay_on ? 'ok' : 'muted');
+        relayEl.textContent = esp32.relay_on ? 'ON' : 'OFF';
+      }
+
+      const running = payload.running;
+      stopBtn.classList.toggle('hidden', !running);
+      if (running) {
+        const up = running.uptime_seconds != null ? running.uptime_seconds.toFixed(0) + 's' : '?';
+        runningEl.innerHTML = `<span class="badge ok">${escapeHtml(running.name)}</span> ` +
+          `<span class="muted-text">PID ${running.pid}, ${up}` +
+          `${running.external ? ', pornit din afara dashboard-ului' : ''}</span>`;
+      } else {
+        runningEl.innerHTML = '<span class="muted-text">niciunul</span>';
+      }
+      if (typeof onStatus === 'function') onStatus(payload);
+    }
+
+    function action(btn, busyText, url, body) {
+      errEl.textContent = '';
+      const label = btn.textContent;
+      btn.textContent = busyText;
+      relayOffBtn.disabled = stopBtn.disabled = true;
+      return fetch(url, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body || {}),
+      }).then(r => r.json()).then(data => {
+        if (!data.ok) errEl.textContent = 'Eroare: ' + (data.error || 'necunoscuta');
+      }).catch(() => { errEl.textContent = 'Eroare de retea.'; })
+        .finally(() => {
+          btn.textContent = label;
+          relayOffBtn.disabled = stopBtn.disabled = false;
+        });
+    }
+
+    // Relay OFF cuts motor power and stops whatever script is running.
+    relayOffBtn.addEventListener('click', () => action(relayOffBtn, 'Se opreste...', '/api/relay', { on: false }));
+    stopBtn.addEventListener('click', () => action(stopBtn, 'Se opreste...', '/api/stop'));
+
+    let stream = null;
+    function open() {
+      if (stream || document.hidden) return;
+      stream = new EventSource('/api/stream/status');
+      stream.onmessage = (e) => render(JSON.parse(e.data));
+    }
+    function close() {
+      if (stream) { stream.close(); stream = null; }
+    }
+    document.addEventListener('visibilitychange', () => { if (document.hidden) close(); else open(); });
+    open();
+  })();
+</script>

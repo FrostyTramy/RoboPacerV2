@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<iq:manifest xmlns:iq="http://www.garmin.com/xml/connectiq" version="3">
+    <iq:application
+        entry="GarminPacerApp"
+        launcherIcon="@Drawables.LauncherIcon"
+        id="a0b0c0d0-e0f0-1234-5678-000000000001"
+        minSdkVersion="3.2.0"
+        name="@Strings.AppName"
+        type="watch-app">
+        <iq:products>
+            <iq:product id="fr965"/>
+        </iq:products>
+        <iq:permissions>
+            <iq:uses-permission id="BluetoothLowEnergy"/>
+            <iq:uses-permission id="Positioning"/>
+            <iq:uses-permission id="Fit"/>
+            <iq:uses-permission id="UserProfile"/>
+        </iq:permissions>
+        <iq:languages>
+            <iq:language>eng</iq:language>
+            <iq:language>ron</iq:language>
+        </iq:languages>
+    </iq:application>
+</iq:manifest>

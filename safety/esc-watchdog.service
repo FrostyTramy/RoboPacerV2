@@ -1,0 +1,19 @@
+# Install: copy to /etc/systemd/system/, then `systemctl enable --now esc-watchdog.service`.
+#
+# EDIT ExecStart below to match wherever this repo is actually checked out
+# on the Pi before installing. esc_watchdog.sh derives its own ALLOWED_SCRIPTS
+# paths from its own location, so this is the only path that needs updating.
+[Unit]
+Description=RoboPacerV2 ESC fail-safe watchdog
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/home/pi/RoboPacerV2/safety/esc_watchdog.sh
+Restart=always
+RestartSec=2
+User=pi
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,25 @@
+# Install: copy to /etc/systemd/system/, then `systemctl enable --now estop-listener.service`.
+#
+# IMPORTANT: only one estop_listener.py may run at a time — it exclusively
+# owns the ESP32 serial port and binds the /tmp/esp32_relay.sock and
+# /tmp/esp32_odometry.sock sockets. If main's estop-listener.service is
+# already installed and pointed at a different checkout, disable it first
+# (`systemctl disable --now estop-listener.service`) before enabling this one.
+#
+# EDIT ExecStart below to match wherever this repo is actually checked out
+# on the Pi before installing.
+[Unit]
+Description=RoboPacerV2 emergency-stop listener (ESP32 over USB serial)
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/pi/RoboPacerV2/safety/estop_listener.py
+Restart=always
+RestartSec=2
+User=pi
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

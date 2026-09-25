@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="ro">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RoboPacerV2</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="top-row">
+    <div>
+      <h1>RoboPacerV2</h1>
+      <div class="status-line" id="clock"></div>
+    </div>
+    <button class="btn secondary" id="wifi-toggle">WiFi</button>
+  </div>
+
+  <div id="wifi-panel" class="wifi-panel hidden">
+    <h2>Conexiune WiFi</h2>
+    <div class="status-line" id="wifi-current">Se verifica...</div>
+    <button class="btn small" id="wifi-scan-btn">Scaneaza</button>
+    <div class="status-line" id="wifi-scan-status"></div>
+    <div class="wifi-list" id="wifi-list"></div>
+
+    <div id="wifi-connect-form" class="hidden" style="margin-top: 14px;">
+      <div class="field-group">
+        <label id="wifi-connect-label">Conecteaza-te la:</label>
+        <input type="password" id="wifi-password" placeholder="Parola WiFi">
+      </div>
+      <button class="btn small" id="wifi-connect-btn">Conecteaza</button>
+      <button class="btn small secondary" id="wifi-cancel-btn">Anuleaza</button>
+      <div class="status-line" id="wifi-connect-status"></div>
+    </div>
+  </div>
+
+  {% include "_status_bar.html" %}
+
+  <h2>Stare sistem</h2>
+  <div class="grid" id="stats-grid">
+    <div class="card"><div class="label">CPU</div><div class="value" id="stat-cpu">--</div></div>
+    <div class="card"><div class="label">Hailo</div><div class="value" id="stat-hailo">--</div></div>
+    <div class="card"><div class="label">ESP32</div><div class="value" id="stat-esp32">--</div></div>
+    <div class="card"><div class="label">Watchdog</div><div class="value" id="stat-watchdog">--</div></div>
+    <div class="card"><div class="label">Controller</div><div class="value" id="stat-controller">--</div></div>
+  </div>
+
+  <h2>Scripturi</h2>
+  <div class="script-list">
+    {% for script in scripts %}
+    <a class="script-card" href="{{ url_for('run_page', script_id=script.id) }}">
+      <span>
+        <span class="name">{{ script.name }}</span>
+        <span class="desc">{{ script.description }}</span>
+      </span>
+      <span class="badge muted" id="script-badge-{{ script.id }}">deschide &rarr;</span>
+    </a>
+    {% endfor %}
+  </div>
+
+  <script>
+    function setClock() {
+      document.getElementById('clock').textContent = new Date().toLocaleString();
+    }
+    setClock();
+    setInterval(setClock, 1000);
+
+    // Called by the shared status bar with every /api/stream/status update.
+    function onStatus(payload) {
+      const stats = payload.stats || {};
+      document.getElementById('stat-cpu').textContent =
+        stats.cpu_temp_c != null ? stats.cpu_temp_c.toFixed(1) + '°C' : '--';
+      document.getElementById('stat-hailo').textContent =
+        stats.hailo_temp_c != null ? stats.hailo_temp_c.toFixed(1) + '°C' : '--';
+
+      const esp32 = stats.esp32 || {};
+      document.getElementById('stat-esp32').innerHTML = !esp32.service_running
+        ? '<span class="badge bad">serviciu oprit</span>'
+        : `<span class="badge ${esp32.esp32_connected ? 'ok' : 'bad'}">${esp32.esp32_connected ? 'conectat' : 'deconectat'}</span>`;
+      document.getElementById('stat-watchdog').innerHTML =
+        `<span class="badge ${esp32.watchdog_armed ? 'ok' : 'warn'}">${esp32.watchdog_armed ? 'armat' : 'dezarmat'}</span>`;
+
+      const controller = stats.controller || {};
+      document.getElementById('stat-controller').innerHTML = controller.connected
+        ? `<span class="badge ok">${escapeHtml(controller.name)}</span>`
+        : '<span class="badge bad">deconectat</span>';
+
+      const running = payload.running;
+      document.querySelectorAll('[id^="script-badge-"]').forEach(el => {
+        const isRunning = !!running && el.id === `script-badge-${running.id}`;
+        el.className = isRunning ? 'badge ok' : 'badge muted';
+        el.innerHTML = isRunning ? 'ruleaza' : 'deschide &rarr;';
+      });
+    }
+
+    // --- WiFi panel ---
+    const wifiPanel = document.getElementById('wifi-panel');
+    document.getElementById('wifi-toggle').addEventListener('click', () => {
+      wifiPanel.classList.toggle('hidden');
+      if (!wifiPanel.classList.contains('hidden')) refreshWifiStatus();
+    });
+
+    function refreshWifiStatus() {
+      fetch('/api/wifi/status').then(r => r.json()).then(data => {
+        const el = document.getElementById('wifi-current');
+        if (!data.ok) { el.textContent = 'Eroare: ' + data.error; return; }
+        el.textContent = data.connection
+          ? `Interfata ${data.interface}: conectat la "${data.connection}" (${data.ip || 'fara IP'})`
+          : `Interfata ${data.interface}: neconectat`;
+      });
+    }
+
+    let selectedSsid = null;
+    document.getElementById('wifi-scan-btn').addEventListener('click', () => {
+      const statusEl = document.getElementById('wifi-scan-status');
+      const listEl = document.getElementById('wifi-list');
+      statusEl.textContent = 'Scanare...';
+      listEl.innerHTML = '';
+      fetch('/api/wifi/scan').then(r => r.json()).then(data => {
+        if (!data.ok) { statusEl.textContent = 'Eroare: ' + data.error; return; }
+        statusEl.textContent = `${data.networks.length} retele gasite pe ${data.interface}`;
+        data.networks.forEach(net => {
+          const item = document.createElement('div');
+          item.className = 'wifi-item';
+          item.innerHTML = `<span class="ssid">${escapeHtml(net.ssid)}${net.in_use ? ' (curent)' : ''}</span>` +
+            `<span class="meta">${escapeHtml(net.signal)}% · ${escapeHtml(net.security)}</span>`;
+          item.addEventListener('click', () => selectNetwork(net));
+          listEl.appendChild(item);
+        });
+      }).catch(() => { statusEl.textContent = 'Eroare de retea la scanare.'; });
+    });
+
+    function selectNetwork(net) {
+      selectedSsid = net.ssid;
+      document.getElementById('wifi-connect-form').classList.remove('hidden');
+      document.getElementById('wifi-connect-label').textContent = `Conecteaza-te la: ${net.ssid}`;
+      document.getElementById('wifi-password').value = '';
+      document.getElementById('wifi-connect-status').textContent = '';
+    }
+
+    document.getElementById('wifi-cancel-btn').addEventListener('click', () => {
+      document.getElementById('wifi-connect-form').classList.add('hidden');
+      selectedSsid = null;
+    });
+
+    document.getElementById('wifi-connect-btn').addEventListener('click', () => {
+      if (!selectedSsid) return;
+      const password = document.getElementById('wifi-password').value;
+      const statusEl = document.getElementById('wifi-connect-status');
+      statusEl.textContent = 'Conectare...';
+      fetch('/api/wifi/connect', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ssid: selectedSsid, password }),
+      }).then(r => r.json()).then(data => {
+        statusEl.textContent = data.ok ? 'Conectat!' : ('Eroare: ' + data.error);
+        if (data.ok) refreshWifiStatus();
+      }).catch(() => { statusEl.textContent = 'Eroare de retea la conectare.'; });
+    });
+  </script>
+</body>
+</html>

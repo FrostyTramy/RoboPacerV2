@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="ro">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ script.name }} - RoboPacerV2</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <!--
+    Shared shell for every script page: status bar (relay + running script),
+    Start, and the live console. A page that extends this fills the config
+    block (its parameters), the live block (its telemetry), and defines in
+    page_script:
+      buildParams()   -> object merged into the /api/start payload, or
+                         throws Error(message) to block Start
+      pollLive()      -> optional, called every second while visible
+  -->
+  <div class="top-row">
+    <div>
+      <a href="{{ url_for('home') }}">&larr; Acasa</a>
+      <h1>{{ script.name }}</h1>
+    </div>
+  </div>
+
+  {% include "_status_bar.html" %}
+
+  <div id="config-form">
+    {% block config %}{% endblock %}
+    <button class="btn" id="start-btn">Start</button>
+    <div class="status-line" id="start-blocked"></div>
+    <div class="status-line error-text" id="start-error"></div>
+  </div>
+
+  {% block live %}{% endblock %}
+
+  <h2>Consola (ultimele 50 randuri)</h2>
+  <div class="console" id="console"></div>
+
+  <script>
+    const SCRIPT_ID = {{ script.id | tojson }};
+    const MAX_CONSOLE_LINES = 50;
+  </script>
+
+  {% block page_script %}{% endblock %}
+
+  <script>
+    // --- Start: only when nothing at all is running ------------------------
+    let otherRunning = null;
+    let modelBlocked = false;  // a page (main) can set this to keep Start off
+
+    function refreshStartButton() {
+      document.getElementById('start-btn').disabled = !!otherRunning || modelBlocked;
+      document.getElementById('start-blocked').textContent = otherRunning
+        ? `${otherRunning} ruleaza deja - opreste-l intai (un singur script odata).` : '';
+    }
+
+    function onStatus(payload) {
+      const running = payload.running;
+      const mine = !!running && running.id === SCRIPT_ID;
+      document.getElementById('config-form').classList.toggle('hidden', mine);
+      otherRunning = running && !mine ? running.name : null;
+      refreshStartButton();
+    }
+
+    document.getElementById('start-btn').addEventListener('click', () => {
+      const errEl = document.getElementById('start-error');
+      errEl.textContent = '';
+      let params;
+      try {
+        params = (typeof buildParams === 'function') ? buildParams() : {};
+      } catch (e) {
+        errEl.textContent = e.message;
+        return;
+      }
+      const btn = document.getElementById('start-btn');
+      btn.disabled = true;
+      fetch('/api/start', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...params, id: SCRIPT_ID }),
+      }).then(r => r.json()).then(data => {
+        if (data.error === 'already_running') {
+          errEl.textContent = `${data.running.name} ruleaza deja - opreste-l intai.`;
+        } else if (!data.ok) {
+          errEl.textContent = 'Eroare: ' + (data.error || 'necunoscuta');
+        }
+      }).catch(() => { errEl.textContent = 'Eroare de retea la pornire.'; })
+        .finally(refreshStartButton);
+    });
+
+    // --- Page telemetry ------------------------------------------------------
+    let pollTimer = null;
+    function startPolling() {
+      if (pollTimer || typeof pollLive !== 'function') return;
+      pollLive();
+      pollTimer = setInterval(pollLive, 1000);
+    }
+    function stopPolling() {
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    }
+
+    // --- Console: last 50 lines of this script's current run, then live ---
+    const consoleEl = document.getElementById('console');
+    let consoleLines = [];
+    let statusLine = null;  // live status the script redraws in place ("\r"), like a terminal
+    let consoleStream = null;
+
+    function renderConsole() {
+      const shown = statusLine !== null ? consoleLines.concat([statusLine]) : consoleLines;
+      const last = shown.slice(-MAX_CONSOLE_LINES);
+      consoleEl.textContent = last.length ? last.join('\n') : '(nimic inca)';
+      consoleEl.scrollTop = consoleEl.scrollHeight;
+    }
+    function clearConsole() {
+      consoleLines = [];
+      statusLine = null;
+      renderConsole();
+    }
+    function openConsoleStream() {
+      if (consoleStream || document.hidden) return;
+      consoleStream = new EventSource(`/api/stream/log/${SCRIPT_ID}`);
+      // Server replays the last 50 on every (re)connect - start clean each time.
+      consoleStream.onopen = clearConsole;
+      consoleStream.onmessage = (e) => {
+        consoleLines.push(e.data);
+        statusLine = null;  // a finished line replaces the in-place status
+        if (consoleLines.length > MAX_CONSOLE_LINES) consoleLines = consoleLines.slice(-MAX_CONSOLE_LINES);
+        renderConsole();
+      };
+      consoleStream.addEventListener('status', (e) => { statusLine = e.data; renderConsole(); });
+      consoleStream.addEventListener('reset', clearConsole);
+    }
+    function closeConsoleStream() {
+      if (consoleStream) { consoleStream.close(); consoleStream = null; }
+    }
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) { stopPolling(); closeConsoleStream(); }
+      else { startPolling(); openConsoleStream(); }
+    });
+    startPolling();
+    openConsoleStream();
+  </script>
+</body>
+</html>

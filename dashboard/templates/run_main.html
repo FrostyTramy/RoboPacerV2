@@ -1,0 +1,157 @@
+{% extends "run_base.html" %}
+
+{% block config %}
+  <div class="card" style="margin-bottom: 16px;">
+    <div class="label">Model (.hef)</div>
+    <div class="value" id="model-info">se verifica...</div>
+  </div>
+
+  <h2>Mod viteza</h2>
+  <div class="mode-switch" id="mode-switch">
+    <button type="button" data-mode="cruise" class="active">Cruise</button>
+    <button type="button" data-mode="controller">Controller</button>
+    <button type="button" data-mode="none">Doar steering</button>
+  </div>
+  <div class="status-line" id="mode-help"></div>
+
+  <div id="target-kmh-group" class="field-group">
+    <label>
+      Viteza tinta
+      <span class="toggle-link" id="unit-toggle">(schimba in pace)</span>
+    </label>
+    <input type="text" id="target-kmh" value="8.0" inputmode="decimal">
+  </div>
+
+  <div class="field-group">
+    <label>Distanta tinta (m) - optional, gol = ruleaza pana la oprire</label>
+    <input type="number" id="distance-m" min="{{ distance_min }}" max="{{ distance_max }}" step="1">
+  </div>
+
+  <div class="field-group checkbox">
+    <input type="checkbox" id="raw-steering" checked>
+    <label for="raw-steering">Steering brut (fara EMA/deadzone)</label>
+  </div>
+
+  <div class="field-group checkbox">
+    <input type="checkbox" id="display">
+    <label for="display">Fereastra preview (--display)</label>
+  </div>
+{% endblock %}
+
+{% block live %}
+  <h2>Telemetrie live</h2>
+  <div class="grid">
+    <div class="card"><div class="label">Angajat</div><div class="value" id="tm-engaged">--</div></div>
+    <div class="card"><div class="label">Mod</div><div class="value" id="tm-mode">--</div></div>
+    <div class="card"><div class="label">km/h</div><div class="value" id="tm-kmh">--</div></div>
+    <div class="card"><div class="label">Tinta</div><div class="value" id="tm-target">--</div></div>
+    <div class="card"><div class="label">Pace</div><div class="value" id="tm-pace">--</div></div>
+    <div class="card"><div class="label">Distanta</div><div class="value" id="tm-distance">--</div></div>
+  </div>
+  <div class="status-line" id="tm-stop-reason"></div>
+{% endblock %}
+
+{% block page_script %}
+<script>
+  const TARGET_SPEED_MAX_KMH = {{ target_speed_max_kmh | tojson }};
+  const DISTANCE_MIN = {{ distance_min | tojson }};
+  const DISTANCE_MAX = {{ distance_max | tojson }};
+  const MODE_HELP = {
+    cruise: 'Model la volan, viteza fixa (media = tinta). D-pad inactiv. [A] porneste, [B] opreste.',
+    controller: 'Model la volan, viteza pornind de la 0 - D-pad sus/jos +/- 1 km/h. [A] porneste, [B] opreste. Daca masina sta pe loc ~2s se dezangajeaza singur (motor neutru) - [A] reia, cu distanta de la 0.',
+    none: 'Doar steering-ul modelului - motorul ramane in neutru. [A] porneste, [B] opreste.',
+  };
+
+  // --- Model info -----------------------------------------------------
+  fetch('/api/main/model_info').then(r => r.json()).then(data => {
+    const el = document.getElementById('model-info');
+    if (data.ok) {
+      el.textContent = data.model_name;
+    } else {
+      el.innerHTML = `<span class="error-text">${escapeHtml(data.error)}</span>`;
+      modelBlocked = true;
+      refreshStartButton();
+    }
+  });
+
+  // --- Mode switch + km/h<->pace toggle --------------------------------
+  let currentMode = 'cruise';
+  const modeButtons = document.querySelectorAll('#mode-switch button');
+  function setMode(mode) {
+    currentMode = mode;
+    modeButtons.forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
+    document.getElementById('target-kmh-group').classList.toggle('hidden', mode !== 'cruise');
+    document.getElementById('mode-help').textContent = MODE_HELP[mode];
+  }
+  modeButtons.forEach(btn => btn.addEventListener('click', () => setMode(btn.dataset.mode)));
+  setMode('cruise');
+
+  let unitIsPace = false;
+  function paceFromKmh(kmh) {
+    if (!kmh || kmh <= 0) return '--:--';
+    const totalSec = Math.round(3600 / kmh);
+    return `${Math.floor(totalSec / 60)}:${(totalSec % 60).toString().padStart(2, '0')}`;
+  }
+  function kmhFromPace(paceStr) {
+    const m = paceStr.trim().match(/^(\d+):(\d{1,2})$/);
+    if (!m) return null;
+    const totalMin = parseInt(m[1], 10) + parseInt(m[2], 10) / 60;
+    return totalMin > 0 ? 60 / totalMin : null;
+  }
+  document.getElementById('unit-toggle').addEventListener('click', (e) => {
+    const input = document.getElementById('target-kmh');
+    if (!unitIsPace) {
+      input.value = paceFromKmh(parseFloat(input.value.replace(',', '.')));
+      e.target.textContent = '(schimba in km/h)';
+    } else {
+      input.value = (kmhFromPace(input.value) || 0).toFixed(1);
+      e.target.textContent = '(schimba in pace)';
+    }
+    unitIsPace = !unitIsPace;
+  });
+
+  function buildParams() {
+    let targetKmh = null;
+    if (currentMode === 'cruise') {
+      const input = document.getElementById('target-kmh');
+      targetKmh = unitIsPace ? kmhFromPace(input.value) : parseFloat(input.value.replace(',', '.'));
+      if (!Number.isFinite(targetKmh) || targetKmh < 0.1 || targetKmh > TARGET_SPEED_MAX_KMH) {
+        throw new Error(`Viteza tinta invalida (0.1 - ${TARGET_SPEED_MAX_KMH} km/h).`);
+      }
+    }
+    const distanceRaw = document.getElementById('distance-m').value;
+    let distanceM = null;
+    if (distanceRaw !== '') {
+      distanceM = parseFloat(distanceRaw);
+      if (!Number.isFinite(distanceM) || distanceM < DISTANCE_MIN || distanceM > DISTANCE_MAX) {
+        throw new Error(`Distanta invalida (${DISTANCE_MIN} - ${DISTANCE_MAX} m).`);
+      }
+    }
+    return {
+      speed_mode: currentMode,
+      target_kmh: targetKmh,
+      distance_m: distanceM,
+      raw_steering: document.getElementById('raw-steering').checked,
+      display: document.getElementById('display').checked,
+    };
+  }
+
+  // --- Telemetry (main.py's control socket, only while it runs) ---------
+  function pollLive() {
+    fetch('/api/main/status').then(r => r.json()).then(t => {
+      document.getElementById('tm-engaged').innerHTML = t.engaged
+        ? '<span class="badge ok">DA</span>' : '<span class="badge muted">nu</span>';
+      document.getElementById('tm-mode').textContent = t.speed_mode || '--';
+      document.getElementById('tm-kmh').textContent = t.kmh != null ? t.kmh.toFixed(2) : '--';
+      document.getElementById('tm-target').textContent = t.effective_target_kmh != null
+        ? t.effective_target_kmh.toFixed(1) + ' km/h' : '--';
+      document.getElementById('tm-pace').textContent = t.pace_sec_per_km
+        ? paceFromKmh(3600 / t.pace_sec_per_km) + '/km' : '--:--';
+      document.getElementById('tm-distance').textContent = t.distance_m != null
+        ? `${t.distance_m.toFixed(0)}${t.distance_target_m != null ? ' / ' + t.distance_target_m.toFixed(0) : ''}m`
+        : '--';
+      document.getElementById('tm-stop-reason').textContent = t.stop_reason ? `Motiv oprire: ${t.stop_reason}` : '';
+    });
+  }
+</script>
+{% endblock %}

@@ -1,0 +1,81 @@
+{% extends "run_base.html" %}
+
+{% block config %}
+  <div class="status-line">
+    Condus manual cu controller-ul, salveaza cadre + unghi steering pentru antrenare.
+    [A] porneste/reia inregistrarea, [Y] pauza, [B] salveaza si opreste.
+  </div>
+
+  <h2>Dataset</h2>
+  <div class="mode-switch" id="dataset-mode">
+    <button type="button" data-mode="new" class="active">Dataset nou</button>
+    <button type="button" data-mode="existing">Continua existent</button>
+  </div>
+  <div class="status-line" id="dataset-new-help">Se creeaza urmatorul folder liber set&lt;N&gt; in data_recorder/.</div>
+  <div class="field-group hidden" id="dataset-existing-group">
+    <label for="dataset-select">Folder (cadrele noi se adauga dupa ultimul)</label>
+    <select id="dataset-select"></select>
+    <div class="status-line" id="dataset-status">se incarca...</div>
+  </div>
+
+  <h2>Optiuni</h2>
+  <div class="field-group checkbox">
+    <input type="checkbox" id="legacy">
+    <label for="legacy">Format clasic, fara timestamp (--legacy) - modelul nu va putea folosi frame stacking</label>
+  </div>
+  <div class="field-group checkbox">
+    <input type="checkbox" id="display">
+    <label for="display">Fereastra preview (--display)</label>
+  </div>
+{% endblock %}
+
+{% block page_script %}
+<script>
+  let datasetMode = 'new';
+  let datasets = [];
+  const modeButtons = document.querySelectorAll('#dataset-mode button');
+
+  function setDatasetMode(mode) {
+    datasetMode = mode;
+    modeButtons.forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
+    document.getElementById('dataset-new-help').classList.toggle('hidden', mode !== 'new');
+    document.getElementById('dataset-existing-group').classList.toggle('hidden', mode !== 'existing');
+    if (mode === 'existing') loadDatasets();
+  }
+  modeButtons.forEach(btn => btn.addEventListener('click', () => setDatasetMode(btn.dataset.mode)));
+
+  function loadDatasets() {
+    const select = document.getElementById('dataset-select');
+    const status = document.getElementById('dataset-status');
+    fetch('/api/data_recorder/datasets').then(r => r.json()).then(data => {
+      const previous = select.value;
+      datasets = data.datasets || [];
+      select.innerHTML = '';
+      datasets.forEach(d => {
+        const opt = document.createElement('option');
+        opt.value = d.name;
+        opt.textContent = `${d.name} (${d.frames} cadre)`;
+        select.appendChild(opt);
+      });
+      if (datasets.some(d => d.name === previous)) select.value = previous;
+      status.textContent = datasets.length ? '' : 'Niciun dataset cu cadre in data_recorder/.';
+    }).catch(() => { status.textContent = 'Eroare la incarcarea dataset-urilor.'; });
+  }
+
+  function buildParams() {
+    let dataset;
+    if (datasetMode === 'new') {
+      dataset = { mode: 'new' };
+    } else {
+      const name = document.getElementById('dataset-select').value;
+      if (!name) throw new Error('Alege un dataset existent.');
+      dataset = { mode: 'existing', name };
+    }
+    return {
+      dataset,
+      legacy: document.getElementById('legacy').checked,
+      display: document.getElementById('display').checked,
+    };
+  }
+</script>
+{% endblock %}

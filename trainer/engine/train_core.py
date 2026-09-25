@@ -529,7 +529,10 @@ def run(config, push=None, should_stop=None, emit_done=True):
     push({"type": "log", "level": "info",
           "text": f"Dataset format: {'timestamped, ' + str(frame_stack_n) + '-frame stack' if is_stacked else 'classic, single-frame'}."})
 
-    gap_seconds = float(cfg["frame_stack_gap_seconds"])
+    # Fixed, not configurable: main/main.py builds its live stack with the same
+    # hardcoded 0.1s (config/vision_config.py) and the gap is not stored in the
+    # HEF - any other value would train on spacing the robot never sees.
+    gap_seconds = FRAME_STACK_GAP_SECONDS_DEFAULT
     if is_stacked:
         # records_sorted stays intact (full, time-ordered) so any sample can
         # look back for stack history regardless of which split it landed in

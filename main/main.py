@@ -525,6 +525,10 @@ def main():
 
         engaged = False
         engage_time = 0.0
+        # Start of the "wheel isn't turning yet" grace period. Same as
+        # engage_time, except controller mode restarts it on every D-pad press
+        # so you can keep stepping the speed up until the car actually starts.
+        stale_grace_start = 0.0
         integral = 0.0
         prev_pulse_us = ESC_NEUTRAL_US
         filtered_kmh = 0.0
@@ -560,16 +564,22 @@ def main():
                             for event in controller.read():
                                 if event.type == ecodes.EV_ABS and event.code == ecodes.ABS_HAT0Y:
                                     if speed_mode == "controller":
+                                        previous_target_kmh = target_kmh
                                         if event.value == -1 and last_hat0y == 0:
                                             target_kmh = min(TARGET_SPEED_MAX_KMH, target_kmh + TARGET_SPEED_STEP_KMH)
                                         elif event.value == 1 and last_hat0y == 0:
                                             target_kmh = max(0.0, target_kmh - TARGET_SPEED_STEP_KMH)
                                         last_hat0y = event.value
+                                        if target_kmh != previous_target_kmh:
+                                            stale_grace_start = time.time()
+                                            print(f"\nTinta: {target_kmh:.1f} km/h")
+                                            logging.info(f"D-pad: tinta {target_kmh:.1f} km/h")
                                 elif event.type == ecodes.EV_KEY and event.value == 1:
                                     if event.code == BTN_ENGAGE:
                                         if not engaged:
                                             engaged = True
                                             engage_time = time.time()
+                                            stale_grace_start = engage_time
                                             leg_start_time = engage_time
                                             integral = 0.0
                                             prev_pulse_us = ESC_NEUTRAL_US
@@ -646,8 +656,11 @@ def main():
                             # ESP32 tace cand roata sta (un singur RPM:0.00, apoi
                             # nimic), deci "stale" = masina oprita SAU senzor picat.
                             # In "none" ESC-ul nu e condus - nimic de protejat.
-                            past_grace = (now - engage_time) > ODO_STALE_GRACE_SECONDS
-                            odo_stale = speed_mode != "none" and past_grace and is_odo_stale()
+                            past_grace = (now - stale_grace_start) > ODO_STALE_GRACE_SECONDS
+                            # Controller mode at target 0: neutral is commanded, so a
+                            # motionless wheel is expected, not a sensor failure.
+                            odo_stale = (speed_mode != "none" and past_grace and is_odo_stale()
+                                         and not (speed_mode == "controller" and target_kmh <= 0.0))
                             if odo_stale and speed_mode == "cruise":
                                 engaged = False
                                 esc.neutral()

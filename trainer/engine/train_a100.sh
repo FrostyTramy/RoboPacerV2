@@ -17,7 +17,8 @@
 #
 # --drive-link fetches the dataset for you instead of uploading it by hand:
 # zip your dataset folder (driving_log.json + frames/) into one .zip, share
-# it from Google Drive as "Anyone with the link", and pass that link here.
+# it from Google Drive as "Anyone with the link", and pass that link here -
+# or run without it and paste the link when the script asks for it.
 # Uses gdown, which handles Drive's large-file confirm token; a single zip
 # is far more reliable than pointing at a Drive *folder* full of thousands
 # of individual frame files (per-file rate limits make that slow/flaky).
@@ -41,6 +42,15 @@ while [[ $# -gt 0 ]]; do
         *) echo "Unknown argument: $1"; exit 1 ;;
     esac
 done
+
+# No --drive-link given: ask for it (only when someone is at the terminal).
+# Just Enter = no download, train on a dataset already on the pod.
+if [[ -z "$DRIVE_LINK" && -t 0 ]]; then
+    echo "Google Drive link to the dataset .zip"
+    echo "(just press Enter to use a dataset that's already on the pod):"
+    read -r -p "> " DRIVE_LINK
+    DRIVE_LINK="${DRIVE_LINK//[[:space:]]/}"
+fi
 
 if [[ -n "$DRIVE_LINK" ]]; then
     echo "Downloading dataset from Google Drive..."

@@ -30,8 +30,11 @@ Then just 2 commands:
 
 ```bash
 git clone -b clean-trainer https://github.com/FrostyTramy/RoboPacerV2 /workspace/RoboPacerV2 && cd /workspace/RoboPacerV2/trainer/engine
-bash train_a100.sh --drive-link "https://drive.google.com/file/d/XXXXXXXX/view?usp=sharing"
+bash train_a100.sh
 ```
+
+It asks for the Google Drive link of your dataset `.zip` - paste it and press
+Enter (or just press Enter if the dataset is already on the pod).
 
 This clones just the trainer branch into `/workspace` (RunPod's persistent
 volume), downloads + unzips your dataset from the Drive link automatically,

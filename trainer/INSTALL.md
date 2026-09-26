@@ -117,8 +117,8 @@ whichever folder you're running from.
    - upload it manually into a folder under `/workspace`, e.g.
      `/workspace/PistaAtletism/` containing `driving_log.json` + `frames/`, or
    - zip it (`driving_log.json` + `frames/` in one `.zip`), upload the zip to
-     Google Drive, share it as "Anyone with the link", and pass that link to
-     `train_a100.sh --drive-link "<url>"` in step 5 — it downloads and
+     Google Drive, share it as "Anyone with the link", and paste that link when
+     `train_a100.sh` asks for it in step 5 (or pass `--drive-link "<url>"`) — it downloads and
      unzips it into `/workspace` for you (via `gdown`, installed
      automatically). A single zip is far more reliable than a Drive
      *folder* link when there are thousands of individual frame files.

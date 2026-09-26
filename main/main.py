@@ -145,7 +145,7 @@ from config.servo_esc import ESC, SteeringServo, steering_label_to_angle
 from config.cruise_pi import cruise_pulse_us
 from config.estop import relay_cmd
 from config.odometry import get_rpm, is_odo_stale, odo_reader_loop, rpm_to_kmh
-from config.vision import build_frame_stack, preprocess, quantize_input
+from config.vision import make_quant_lut, preprocess, preprocess_quantized, quantize_input, select_stack_frames
 from config.input_devices import find_xbox_controller
 
 # ---------------------------------------------------------------------------
@@ -471,6 +471,9 @@ def main():
         output_name = hef.get_output_vstream_infos()[0].name
         input_scale = input_info.quant_info.qp_scale
         input_zero_point = input_info.quant_info.qp_zp
+        # Normalize + quantize precomputed per pixel value for this .hef's own
+        # scale/zero point - see config/vision.py.
+        quant_lut = make_quant_lut(input_scale, input_zero_point)
 
         input_channels = input_info.shape[-1]
         if input_channels % 3 != 0:
@@ -557,7 +560,8 @@ def main():
         fps_window_start = t_prev
         fps_window_frames = 0
         frame_counter = 0
-        frame_history = deque()
+        frame_history = deque()  # (timestamp, (R, G, B) planes) of the quantized frames
+        input_verified = False
 
         with VDevice() as device:
             cfg_params = ConfigureParams.create_from_hef(hef, interface=HailoStreamInterface.PCIe)
@@ -666,17 +670,27 @@ def main():
                             time.sleep(0.05)
                             continue
 
-                        img_float = preprocess(frame)
+                        img_q = preprocess_quantized(frame, quant_lut)
+                        if not input_verified:
+                            # Once, on a real frame: the fast path must give the
+                            # Hailo exactly the bytes the reference (trainer-style
+                            # float) path would. Never drive on anything else.
+                            reference = quantize_input(preprocess(frame), input_scale, input_zero_point)
+                            if not np.array_equal(img_q, reference):
+                                raise RuntimeError("Preprocesarea rapida difera de cea de referinta - "
+                                                   "oprit ca sa nu conduca modelul pe alt input.")
+                            logging.info("Preprocesare rapida verificata: identica cu referinta")
+                            input_verified = True
                         now = time.time()
                         if frame_stack_n > 1:
-                            frame_history.append((now, img_float))
+                            frame_history.append((now, cv2.split(img_q)))
                             cutoff = now - (frame_stack_n - 1) * FRAME_STACK_GAP_SECONDS - 0.5
                             while len(frame_history) > 1 and frame_history[0][0] < cutoff:
                                 frame_history.popleft()
-                            stack = build_frame_stack(frame_history, now, frame_stack_n)
+                            planes = select_stack_frames(frame_history, now, frame_stack_n)
+                            inp = cv2.merge([p for frame_planes in planes for p in frame_planes])[np.newaxis]
                         else:
-                            stack = img_float
-                        inp = quantize_input(stack[np.newaxis], input_scale, input_zero_point)
+                            inp = img_q[np.newaxis]
                         result = pipeline.infer({input_name: inp})
                         raw_label = float(np.array(result[output_name]).reshape(-1)[0])
                         smooth_label = SMOOTH_ALPHA * raw_label + (1 - SMOOTH_ALPHA) * smooth_label

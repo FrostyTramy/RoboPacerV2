@@ -520,7 +520,15 @@ def main():
             print("Atentie: thread-ul de scriere nu s-a oprit la timp - unele cadre recente pot lipsi din log.")
 
         if driving_log:
+            # cv2.imwrite returning only means the JPEG reached Linux's page
+            # cache - the SD card gets it seconds later. Power lost in that
+            # window left the session's last ~6s of frames empty/truncated
+            # while driving_log.json still listed them. Flush all frames to
+            # the card first; save_driving_log then fsyncs the log itself.
+            print("Se scriu cadrele pe cardul SD...")
+            os.sync()
             save_driving_log(driving_log)
+            print("Cadre + log scrise pe card - e sigur sa opresti alimentarea.")
         if esc is not None:
             time.sleep(0.1)
             esc.stop()

@@ -538,6 +538,8 @@ def main():
         filtered_kmh = 0.0
         smooth_label = 0.0
         last_hat0y = 0
+        controller_lost = False       # Bluetooth pad dropped (controller mode only)
+        last_reconnect_try = 0.0
         last_control_time = time.time()
         last_tick_time = time.time()
 
@@ -562,10 +564,49 @@ def main():
             with network_group.activate(ng_params):
                 with InferVStreams(network_group, in_vstream_params, out_vstream_params) as pipeline:
                     while True:
-                        ready, _, _ = select.select([controller_fd], [], [], 0.001)
+                        if controller_lost and time.time() - last_reconnect_try >= 0.5:
+                            last_reconnect_try = time.time()
+                            try:
+                                new_controller = find_xbox_controller()
+                            except OSError:
+                                new_controller = None
+                            if new_controller is not None:
+                                try:
+                                    controller.close()
+                                except OSError:
+                                    pass
+                                controller = new_controller
+                                controller_fd = controller.fd
+                                controller_lost = False
+                                last_hat0y = 0
+                                print("\nController reconectat - apasa [A] ca sa pornesti din nou.")
+                                logging.info("Controller reconectat")
+                                rumble(300)
+
+                        ready, _, _ = select.select([] if controller_lost else [controller_fd], [], [], 0.001)
 
                         for _ in ready:
-                            for event in controller.read():
+                            try:
+                                events = list(controller.read())
+                            except OSError as e:
+                                if speed_mode != "controller":
+                                    raise  # cruise/none: keep the old fail-safe (abort, relay off)
+                                # The Bluetooth link dropped (Errno 19 - it normally comes
+                                # back within seconds). Open-loop PWM can't keep driving
+                                # without the pad, so go to neutral NOW - but stay alive
+                                # with the relay on and wait for it, instead of aborting.
+                                events = []
+                                controller_lost = True
+                                last_reconnect_try = 0.0
+                                if engaged:
+                                    engaged = False
+                                    esc.neutral()
+                                    prev_pulse_us = ESC_NEUTRAL_US
+                                    pwm_offset_us = 0.0
+                                print(f"\n!!! Controller pierdut ({e}) - ESC la neutru. "
+                                      "Astept reconectarea, apoi [A] !!!")
+                                logging.warning(f"Controller pierdut: {e}")
+                            for event in events:
                                 if event.type == ecodes.EV_ABS and event.code == ecodes.ABS_HAT0Y:
                                     if speed_mode == "controller":
                                         pwm_step = 0.0

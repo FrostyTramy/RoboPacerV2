@@ -68,6 +68,7 @@
     <div class="card"><div class="label">PWM</div><div class="value" id="tm-pwm">--</div></div>
     <div class="card"><div class="label">Pace</div><div class="value" id="tm-pace">--</div></div>
     <div class="card"><div class="label">Distanta</div><div class="value" id="tm-distance">--</div></div>
+    <div class="card"><div class="label">FPS (medie 1s)</div><div class="value" id="tm-fps">--</div></div>
   </div>
   <div class="status-line" id="tm-stop-reason"></div>
 {% endblock %}
@@ -258,6 +259,7 @@
       document.getElementById('tm-distance').textContent = t.distance_m != null
         ? `${t.distance_m.toFixed(0)}${t.distance_target_m != null ? ' / ' + t.distance_target_m.toFixed(0) : ''}m`
         : '--';
+      document.getElementById('tm-fps').textContent = t.fps != null ? t.fps.toFixed(1) : '--';
       document.getElementById('tm-stop-reason').textContent = t.stop_reason ? `Motiv oprire: ${t.stop_reason}` : '';
     });
   }

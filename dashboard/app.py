@@ -344,7 +344,7 @@ def api_main_status():
     return jsonify(status or {
         "engaged": None, "speed_mode": None, "target_kmh": None, "effective_target_kmh": None,
         "kmh": None, "pace_sec_per_km": None, "distance_m": None, "distance_target_m": None,
-        "stop_reason": None, "pwm_us": None,
+        "stop_reason": None, "pwm_us": None, "fps": None,
     })
 
 
@@ -678,6 +678,10 @@ def stream_status():
     def generate():
         while True:
             running = _status_payload()
+            if running is not None and running["id"] == "main":
+                # Inference FPS for the status bar on every page - main.py
+                # already averages it over 1s, this is one socket read/s.
+                running["fps"] = (system_stats.get_main_status() or {}).get("fps")
             payload = {"running": running, "stats": _stats_payload(running)}
             yield f"data: {json.dumps(payload)}\n\n"
             time.sleep(STATUS_STREAM_INTERVAL_SECONDS)

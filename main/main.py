@@ -156,6 +156,7 @@ STEERING_DEADZONE = 0.06
 FRAME_STACK_GAP_SECONDS = 0.1
 
 DISPLAY_EVERY_N_FRAMES = 4
+FPS_WINDOW_SECONDS = 1.0  # dashboard FPS = frames counted over this window
 
 # ---------------------------------------------------------------------------
 # Tick logging + splits
@@ -210,7 +211,7 @@ def _format_pace_ms(pace_sec_per_km):
 _live_state = {
     "engaged": False, "speed_mode": "", "target_kmh": 0.0, "effective_target_kmh": 0.0,
     "kmh": 0.0, "distance_m": 0.0, "distance_target_m": None, "stop_reason": None,
-    "pwm_us": None,
+    "pwm_us": None, "fps": None,
 }
 _live_lock = threading.Lock()
 
@@ -261,6 +262,7 @@ def _control_server_loop(stop_event):
                         "distance_target_m": live["distance_target_m"],
                         "stop_reason": live["stop_reason"],
                         "pwm_us": round(live["pwm_us"], 1) if live["pwm_us"] is not None else None,
+                        "fps": live["fps"],
                     }
                     try:
                         conn.sendall((json.dumps(payload) + "\n").encode())
@@ -552,6 +554,8 @@ def main():
 
         current_fps = 0.0
         t_prev = time.time()
+        fps_window_start = t_prev
+        fps_window_frames = 0
         frame_counter = 0
         frame_history = deque()
 
@@ -691,6 +695,13 @@ def main():
                         t_now = time.time()
                         current_fps = 0.9 * current_fps + 0.1 / max(t_now - t_prev, 1e-9)
                         t_prev = t_now
+                        # Dashboard FPS: a plain frame count per window, published
+                        # once per window - not a per-frame update.
+                        fps_window_frames += 1
+                        if t_now - fps_window_start >= FPS_WINDOW_SECONDS:
+                            _update_live(fps=round(fps_window_frames / (t_now - fps_window_start), 1))
+                            fps_window_start = t_now
+                            fps_window_frames = 0
 
                         # --- speed (cruise-control regulator, cruise/controller only) ---
                         rpm = get_rpm()

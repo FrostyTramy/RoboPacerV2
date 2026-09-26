@@ -83,7 +83,8 @@
       stopBtn.classList.toggle('hidden', !running);
       if (running) {
         const up = running.uptime_seconds != null ? running.uptime_seconds.toFixed(0) + 's' : '?';
-        runningEl.innerHTML = `<span class="badge ok">${escapeHtml(running.name)}</span> ` +
+        const fps = running.fps != null ? ` <span class="badge muted">${running.fps.toFixed(1)} FPS</span>` : '';
+        runningEl.innerHTML = `<span class="badge ok">${escapeHtml(running.name)}</span>${fps} ` +
           `<span class="muted-text">PID ${running.pid}, ${up}` +
           `${running.external ? ', pornit din afara dashboard-ului' : ''}</span>`;
       } else {

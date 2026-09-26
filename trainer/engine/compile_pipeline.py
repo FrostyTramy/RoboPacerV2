@@ -19,21 +19,55 @@ DFC_WHEEL_PATH = train_core.ENGINE_DIR / "compile" / "resources" / "hailo_datafl
 SMOKE_TEST_NAME = "smoketest"
 
 
+def check_calibration_file(path, frame_stack_n=None):
+    """None if `path` is usable Hailo calibration data (N, 224, 224, 3*stack)
+    float32 NHWC, as save_calibration_data writes it - else an error message.
+    With frame_stack_n, also checks it matches the model being compiled."""
+    try:
+        arr = np.load(str(path), mmap_mode="r")
+    except Exception as e:
+        return f"Can't read calibration .npy: {e}"
+    size = train_core.IMG_SIZE
+    if arr.ndim != 4 or arr.shape[1:3] != (size, size) or arr.shape[3] % 3 or arr.shape[0] < 1:
+        return (f"Not a calibration .npy: shape {tuple(arr.shape)}, expected "
+                f"(samples, {size}, {size}, 3 x frame stack).")
+    if arr.dtype != np.float32:
+        return f"Calibration .npy has dtype {arr.dtype}, expected float32."
+    if frame_stack_n is not None and arr.shape[3] != 3 * frame_stack_n:
+        return (f"Calibration .npy is for a {arr.shape[3] // 3}-frame stack, but this "
+                f"model uses {frame_stack_n} - pick the .npy saved with this .pth.")
+    return None
+
+
+def compile_prereq_status():
+    """{"docker_running": bool, "docker_installed": bool, "wheel_present": bool}
+    - what compiling needs on this machine. Training alone needs neither."""
+    try:
+        r = subprocess.run(["docker", "info"], capture_output=True, timeout=15)
+        docker_installed, docker_running = True, r.returncode == 0
+    except FileNotFoundError:
+        docker_installed, docker_running = False, False
+    except subprocess.TimeoutExpired:  # Docker Desktop still starting up
+        docker_installed, docker_running = True, False
+    return {"docker_running": docker_running, "docker_installed": docker_installed,
+            "wheel_present": DFC_WHEEL_PATH.exists()}
+
+
 def check_compile_prereqs(push):
     """Checked BEFORE training starts, not after - a missing wheel or a
     stopped Docker Desktop should fail in a second, not after a training
     run that can take hours."""
-    ok = True
-    r = subprocess.run(["docker", "info"], capture_output=True)
-    if r.returncode != 0:
+    status = compile_prereq_status()
+    if not status["docker_installed"]:
+        push({"type": "log", "level": "error",
+              "text": "Docker is not installed - install Docker Desktop (see INSTALL.md)."})
+    elif not status["docker_running"]:
         push({"type": "log", "level": "error", "text": "Docker is not running - start Docker Desktop first."})
-        ok = False
-    if not DFC_WHEEL_PATH.exists():
+    if not status["wheel_present"]:
         push({"type": "log", "level": "error",
               "text": f"Hailo DFC wheel not found at {DFC_WHEEL_PATH}. "
                       f"Download it from the Hailo Developer Zone and place it there (see INSTALL.md)."})
-        ok = False
-    return ok
+    return status["docker_running"] and status["wheel_present"]
 
 
 def _ensure_lf_line_endings(path):
@@ -169,11 +203,10 @@ def retry_compile(config, push=None):
 def compile_from_pth(config, push=None):
     """Loads an external .pth, exports it to ONNX, and compiles it to HEF.
 
-    config keys: pth_path, model_name, json_path (dataset folder - used to
-    generate real calibration data if none exists yet), calib_npy (optional
-    explicit calibration .npy path, takes priority over json_path),
-    allow_synthetic_calib (opt-in bool, only consulted if neither of the
-    above yields calibration data - see the priority order below)."""
+    config keys: pth_path, model_name, calib_npy (the calibration .npy saved
+    next to the .pth by training - required by the Compile-only panel). When
+    calib_npy is omitted (the Full train+compile chain), the .npy that run()
+    just wrote as models/<model_name>_calib_data_nhwc.npy is used instead."""
     if push is None:
         push = lambda e: print(e.get("text", e))
 
@@ -185,6 +218,10 @@ def compile_from_pth(config, push=None):
 
     if not pth_path.exists():
         push({"type": "log", "level": "error", "text": f"PTH file not found: {pth_path}"})
+        push({"type": "done"})
+        return
+    # First, before any work - no point exporting ONNX if Docker is off.
+    if not check_compile_prereqs(push):
         push({"type": "done"})
         return
 
@@ -201,42 +238,29 @@ def compile_from_pth(config, push=None):
     train_core.export_onnx(model, device, onnx_path, frame_stack_n)
     push({"type": "log", "level": "success", "text": f"ONNX exported: models/{model_name}.onnx"})
 
-    # Calibration data priority: (1) already exists for this model name,
-    # (2) an explicitly supplied .npy, (3) real data generated from a
-    # supplied dataset folder, (4) synthetic data, but only if the caller
-    # explicitly opts in - this is a deliberately weaker fallback, not the
-    # silent default it used to be.
-    if not calib_path.exists():
-        calib_npy_str = (config.get("calib_npy") or "").strip()
-        json_path_str = (config.get("json_path") or "").strip()
-        if calib_npy_str and Path(calib_npy_str).exists():
-            shutil.copy(calib_npy_str, calib_path)
-            push({"type": "log", "level": "info", "text": "Calibration data copied."})
-        elif json_path_str:
-            try:
-                records, data_root, _ = train_core.resolve_dataset(json_path_str)
-            except (FileNotFoundError, ValueError) as e:
-                push({"type": "log", "level": "error", "text": str(e)})
-                push({"type": "done"})
-                return
-            push({"type": "log", "level": "info", "text": "Generating calibration data from dataset..."})
-            train_core.save_calibration_data(records, data_root, calib_path, frame_stack_n=frame_stack_n)
-            push({"type": "log", "level": "success", "text": "Calibration data generated from real frames."})
-        elif config.get("allow_synthetic_calib"):
-            push({"type": "log", "level": "warning",
-                  "text": "No dataset or calibration file given - using synthetic calibration data "
-                          "(lower quantization accuracy), as explicitly requested."})
-            calib = np.random.randn(train_core.CALIB_N_DEFAULT, train_core.IMG_SIZE, train_core.IMG_SIZE,
-                                     3 * frame_stack_n).astype(np.float32)
-            np.save(str(calib_path), calib)
-        else:
-            push({"type": "log", "level": "error",
-                  "text": "No calibration data available - provide a dataset folder, a calibration "
-                          ".npy file, or explicitly opt into synthetic calibration data."})
+    # Calibration data: the file the user picked always wins (copied over any
+    # stale one with this model name). No dataset/synthetic fallbacks here -
+    # real calibration frames decide INT8 accuracy on the robot.
+    calib_npy_str = (config.get("calib_npy") or "").strip()
+    if calib_npy_str:
+        src = Path(calib_npy_str)
+        if not src.exists():
+            push({"type": "log", "level": "error", "text": f"Calibration .npy not found: {src}"})
             push({"type": "done"})
             return
+        if src.resolve() != calib_path.resolve():
+            shutil.copy(str(src), str(calib_path))
+        push({"type": "log", "level": "info", "text": f"Calibration data: {src.name}"})
+    elif not calib_path.exists():
+        push({"type": "log", "level": "error",
+              "text": "Calibration .npy is required - pick the _calib_data_nhwc.npy that "
+                      "training saved next to the .pth."})
+        push({"type": "done"})
+        return
 
-    if not check_compile_prereqs(push):
+    err = check_calibration_file(calib_path, frame_stack_n)
+    if err:
+        push({"type": "log", "level": "error", "text": err})
         push({"type": "done"})
         return
 

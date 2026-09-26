@@ -44,6 +44,24 @@ header h1 {
   color: #fff;
 }
 
+.prereq-banner {
+  margin: 12px 24px 0 24px;
+  padding: 8px 14px;
+  border-radius: 6px;
+  font-size: 13px;
+  border: 1px solid #2a2d33;
+  color: #999;
+}
+.prereq-banner.ok { color: #4ade80; border-color: #1f4d33; background: #13241b; }
+.prereq-banner.info { color: #9ca3af; }
+.prereq-banner.warn {
+  color: #fbbf24;
+  border-color: #6b4f14;
+  background: #2a2110;
+  font-size: 14px;
+  font-weight: 600;
+}
+
 .action-tabs {
   display: flex;
   gap: 4px;

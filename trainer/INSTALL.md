@@ -161,10 +161,9 @@ whichever folder you're running from.
    whatever's convenient).
 
 8. **Finish on Windows:** launch the web UI, go to **Compile-only**, point
-   it at the `.pth` you copied back. It'll automatically pick up the
-   `_calib_data_nhwc.npy` sitting next to it if you copy both into
-   `trainer/models/` — otherwise supply the `.npy` explicitly in the
-   Advanced panel.
+   it at the `.pth` you copied back, and at its `_calib_data_nhwc.npy`
+   (both required - if the `.npy` sits next to the `.pth`, picking the
+   `.pth` fills it in for you).
 
 9. **Tear down the pod** once you've retrieved your files — A100 time
    costs money even when idle.

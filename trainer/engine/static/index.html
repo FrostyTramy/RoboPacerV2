@@ -15,6 +15,8 @@
   </div>
 </header>
 
+<div class="prereq-banner checking" id="prereq-banner">Checking Docker...</div>
+
 <nav class="action-tabs" id="action-tabs">
   <button data-action-btn="full" class="active">Full (Train + Compile)</button>
   <button data-action-btn="train-only">Train only</button>
@@ -141,32 +143,17 @@
       <span class="validate-result"></span>
     </div>
     <div class="field">
-      <label>Output model name</label>
-      <input type="text" id="compileonly_model_name" data-field="model_name" placeholder="model">
-    </div>
-    <div class="field">
-      <label>Dataset folder (optional - for real calibration data)</label>
+      <label>Calibration data (.npy) - saved by training next to the .pth</label>
       <div class="path-row">
-        <input type="text" id="compileonly_json_path" data-field="json_path" data-validate-kind="dataset" placeholder="D:\...\PistaAtletism">
-        <button type="button" data-browse="compileonly_json_path" data-browse-type="folder">Browse...</button>
+        <input type="text" id="compileonly_calib_npy" data-field="calib_npy" data-validate-kind="npy" placeholder="D:\...\models\model_calib_data_nhwc.npy">
+        <button type="button" data-browse="compileonly_calib_npy" data-browse-type="file" data-file-type="npy">Browse...</button>
       </div>
       <span class="validate-result"></span>
     </div>
-
-    <fieldset class="advanced-field">
-      <legend>Advanced</legend>
-      <div class="field">
-        <label>Calibration .npy (optional, overrides dataset)</label>
-        <div class="path-row">
-          <input type="text" id="compileonly_calib_npy" data-field="calib_npy" data-validate-kind="npy" placeholder="D:\...\models\model_calib_data_nhwc.npy">
-          <button type="button" data-browse="compileonly_calib_npy" data-browse-type="file" data-file-type="npy">Browse...</button>
-        </div>
-        <span class="validate-result"></span>
-      </div>
-      <div class="field checkbox-field">
-        <label><input type="checkbox" data-field="allow_synthetic_calib"> No dataset available - use synthetic calibration (lower accuracy)</label>
-      </div>
-    </fieldset>
+    <div class="field">
+      <label>Output model name</label>
+      <input type="text" id="compileonly_model_name" data-field="model_name" placeholder="model">
+    </div>
 
     <div class="actions">
       <button class="start-btn primary" id="compileonly_start">Compile</button>

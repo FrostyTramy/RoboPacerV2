@@ -63,8 +63,8 @@ Pods use key auth only — no password.
 ## Step 4 — Compile
 
 Run `trainer\engine\start.bat`, open `http://localhost:5000` → **Compile-only**,
-point it at the `.pth`. It auto-picks up the `.npy` sitting next to it. Out
-comes your `.hef`.
+pick the `.pth` and its `_calib_data_nhwc.npy` (both required - picking the
+`.pth` fills in the `.npy` when it sits next to it). Out comes your `.hef`.
 
 ---
 

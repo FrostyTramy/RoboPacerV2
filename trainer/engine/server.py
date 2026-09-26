@@ -94,6 +94,23 @@ def get_defaults():
     return jsonify(defaults.CORE_RECIPE_DEFAULTS)
 
 
+_prereq_cache = {"at": 0.0, "status": None}
+_prereq_lock = threading.Lock()
+
+
+@app.route("/api/prereqs")
+def prereqs():
+    """Docker / Hailo compiler status for the page's always-visible banner,
+    so a stopped Docker Desktop is noticed before Full or Compile, not after.
+    Cached a few seconds - several tabs polling shouldn't each run `docker info`."""
+    with _prereq_lock:
+        if _prereq_cache["status"] is None or time.time() - _prereq_cache["at"] > 4:
+            import compile_pipeline
+            _prereq_cache["status"] = compile_pipeline.compile_prereq_status()
+            _prereq_cache["at"] = time.time()
+        return jsonify(_prereq_cache["status"])
+
+
 @app.route("/api/validate")
 def validate():
     kind = request.args.get("kind", "dataset")
@@ -115,13 +132,21 @@ def validate():
                 return jsonify({"ok": False, "error": f"Not found: {p}"})
             state = train_core.torch.load(str(p), map_location="cpu")
             frame_stack_n = state["conv1.weight"].shape[1] // 3
-            return jsonify({"ok": True, "frame_stack_n": frame_stack_n})
+            # Training saves the calibration file next to the .pth - offer it.
+            sibling = p.with_name(f"{p.stem}_calib_data_nhwc.npy")
+            return jsonify({"ok": True, "frame_stack_n": frame_stack_n,
+                            "calib_npy": str(sibling) if sibling.exists() else None})
         elif kind == "npy":
             p = Path(path)
             if not p.exists():
                 return jsonify({"ok": False, "error": f"Not found: {p}"})
+            import compile_pipeline
+            err = compile_pipeline.check_calibration_file(p)
+            if err:
+                return jsonify({"ok": False, "error": err})
             arr = train_core.np.load(str(p), mmap_mode="r")
-            return jsonify({"ok": True, "record_count": int(arr.shape[0])})
+            return jsonify({"ok": True, "record_count": int(arr.shape[0]),
+                            "frame_stack_n": int(arr.shape[3]) // 3})
         else:
             return jsonify({"ok": False, "error": f"Unknown kind: {kind}"})
     except (FileNotFoundError, ValueError) as e:
@@ -215,10 +240,10 @@ def run_full():
         # Stop only ends training early - the best checkpoint so far is still
         # exported + compiled, same as main's train.py.
         model_name = (config.get("model_name") or "model").strip() or "model"
+        # No calib_npy: uses the one run() just saved for this model name.
         compile_pipeline.compile_from_pth({
             "pth_path": str(train_core.MODELS_DIR / f"{model_name}.pth"),
             "model_name": model_name,
-            "json_path": config.get("json_path"),
         }, _push)
 
     return _start_job("full", job, config, required_fields=("json_path", "model_name"))
@@ -244,7 +269,7 @@ def run_compile_only():
         import compile_pipeline
         compile_pipeline.compile_from_pth(config, _push)
 
-    return _start_job("compile-only", job, config, required_fields=("pth_path", "model_name"))
+    return _start_job("compile-only", job, config, required_fields=("pth_path", "model_name", "calib_npy"))
 
 
 @app.route("/api/run/retry-compile", methods=["POST"])

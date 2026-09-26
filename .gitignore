@@ -52,3 +52,7 @@ venv/
 
 # OS / editor cruft
 .DS_Store
+
+# Local datasets / archives
+datasets/
+*.zip

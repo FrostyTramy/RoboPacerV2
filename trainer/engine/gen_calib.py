@@ -1,16 +1,14 @@
 """
 One-off helper: generate real Hailo calibration data from a local dataset,
-for use with the "Compile-only" flow (compile_from_pth in compile_pipeline.py) -
-avoids it falling back to synthetic random calibration data, which gives
-worse INT8 quantization accuracy than real driving frames.
+for the "Compile-only" flow (compile_from_pth in compile_pipeline.py) when
+the .npy that training saved next to the .pth is lost.
 
 Usage:
     python gen_calib.py <path to driving_log.json or its folder> <model_name>
 
-Writes models/<model_name>_calib_data_nhwc.npy - matching the exact filename
-compile_from_pth() already looks for, so if you use the same model_name in
-the Compile-only panel, it picks this file up automatically (no need to
-fill in the optional calib .npy field).
+Writes models/<model_name>_calib_data_nhwc.npy - pick that file in the
+Compile-only panel's calibration field (picking models/<model_name>.pth
+fills it in automatically).
 """
 import sys
 from pathlib import Path

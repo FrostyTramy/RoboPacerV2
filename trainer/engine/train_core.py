@@ -238,17 +238,21 @@ def _preload_frames_to_ram(records, data_root, push, max_workers=16):
         full = str(data_root / rel_path)
         img_bgr = cv2.imread(full)
         if img_bgr is None:
-            raise FileNotFoundError(f"Could not read image: {full}")
+            return rel_path, full, None  # empty/corrupt JPEG - reported by the caller
         img_rgb = img_bgr[:, :, ::-1]
         img_rgb = cv2.resize(img_rgb, (IMG_SIZE, IMG_SIZE), interpolation=cv2.INTER_LINEAR)
-        return full, np.ascontiguousarray(img_rgb)
+        return rel_path, full, np.ascontiguousarray(img_rgb)
 
     cache = {}
+    bad = set()
     done = 0
     log_step = max(1, len(paths) // 20)
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        for full, img in ex.map(_decode, paths):
-            cache[full] = img
+        for rel_path, full, img in ex.map(_decode, paths):
+            if img is None:
+                bad.add(rel_path)
+            else:
+                cache[full] = img
             done += 1
             if done % log_step == 0 or done == len(paths):
                 push({"type": "log", "level": "info", "text": f"  preloaded {done}/{len(paths)} frames"})
@@ -256,7 +260,24 @@ def _preload_frames_to_ram(records, data_root, push, max_workers=16):
     mb = sum(a.nbytes for a in cache.values()) / (1024 * 1024)
     push({"type": "log", "level": "success",
           "text": f"Preload done: {len(cache)} frames cached in RAM (~{mb/1024:.1f} GB)."})
-    return cache
+    return cache, bad
+
+
+def _find_unreadable_frames(records, data_root, push, max_workers=16):
+    """image_path values whose JPEG can't be decoded - the no-RAM-cache
+    counterpart of _preload_frames_to_ram's check. Decodes at 1/8 size in
+    grayscale, which still reads the whole file (so it catches truncation)
+    but is several times faster than a full decode."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    paths = sorted({r["image_path"] for r in records})
+    push({"type": "log", "level": "info", "text": f"Checking {len(paths)} frames are readable..."})
+
+    def _ok(rel_path):
+        return rel_path, cv2.imread(str(data_root / rel_path), cv2.IMREAD_REDUCED_GRAYSCALE_8) is not None
+
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        return {rel_path for rel_path, ok in ex.map(_ok, paths) if not ok}
 
 
 # ── Dataset ─────────────────────────────────────────────────────────────
@@ -519,6 +540,21 @@ def run(config, push=None, should_stop=None, emit_done=True):
         push({"type": "log", "level": "error", "text": str(e)})
         _finish()
         return False
+    # Decode every frame once up front (into RAM, or a fast reduced-size
+    # check without the cache) so an empty/corrupt JPEG - an interrupted
+    # upload/unzip, or a frame the recorder was killed while writing - is
+    # skipped with a warning here, instead of crashing hours into training.
+    # Done before the split, so a clean dataset gives the exact same split.
+    if cfg["use_ram_cache"]:
+        cache, bad = _preload_frames_to_ram(records, data_root, push)
+    else:
+        cache, bad = None, _find_unreadable_frames(records, data_root, push)
+    if bad:
+        records = [r for r in records if r["image_path"] not in bad]
+        names = ", ".join(sorted(bad)[:5]) + (" ..." if len(bad) > 5 else "")
+        push({"type": "log", "level": "warning",
+              "text": f"Skipping {len(bad)} unreadable frame(s) - empty or corrupt JPEG "
+                      f"(re-copy the dataset to recover them): {names}"})
     push({"type": "log", "level": "info", "text": f"Valid samples: {len(records)}"})
     if len(records) < 10:
         push({"type": "log", "level": "error", "text": "Not enough valid samples to train."})
@@ -556,8 +592,6 @@ def run(config, push=None, should_stop=None, emit_done=True):
             val_idx.extend(chunk)
         # else: leftover chunks held out, unused
     push({"type": "split", "train": len(train_idx), "val": len(val_idx), "total": len(records_sorted)})
-
-    cache = _preload_frames_to_ram(records, data_root, push) if cfg["use_ram_cache"] else None
 
     train_weights = _balanced_sample_weights(records_sorted, train_idx)
     train_sampler = WeightedRandomSampler(train_weights, num_samples=len(train_idx), replacement=True)
@@ -636,6 +670,8 @@ def run(config, push=None, should_stop=None, emit_done=True):
     else:
         push({"type": "log", "level": "success",
               "text": f"Training complete: models/{ckpt_path.name} + {calib_path.name} saved."})
+    push({"type": "log", "level": "warning" if bad else "info",
+          "text": f"Broken frames skipped: {len(bad)}"})
     _finish()
     return True
 

@@ -27,6 +27,7 @@ document.querySelectorAll("[data-action-btn]").forEach(btn => {
 
 function switchAction(action) {
   document.body.dataset.action = action;
+  renderPrereqs();
   document.querySelectorAll("[data-action-btn]").forEach(b => b.classList.toggle("active", b.dataset.actionBtn === action));
   document.querySelectorAll(".action-panel").forEach(p => p.classList.toggle("active", p.dataset.action === action));
 }
@@ -76,8 +77,14 @@ async function validatePath(input) {
         resultEl.textContent = `✓ ${data.record_count} frames, ${data.format} (${data.frame_stack_n}-frame stack)`;
       } else if (kind === "pth") {
         resultEl.textContent = `✓ checkpoint OK (frame_stack_n=${data.frame_stack_n})`;
+        // Training saves <name>_calib_data_nhwc.npy next to the .pth - pre-fill it.
+        const calibInput = input.closest(".action-panel").querySelector('[data-field="calib_npy"]');
+        if (calibInput && data.calib_npy && !calibInput.value.trim()) {
+          calibInput.value = data.calib_npy;
+          validatePath(calibInput);
+        }
       } else if (kind === "npy") {
-        resultEl.textContent = `✓ ${data.record_count} calibration samples`;
+        resultEl.textContent = `✓ ${data.record_count} calibration samples (${data.frame_stack_n}-frame stack)`;
       }
     } else {
       resultEl.className = "validate-result error";
@@ -125,6 +132,19 @@ function collectConfig(panel) {
 async function launch(route, panelName) {
   const panel = document.querySelector(`.action-panel[data-action="${panelName}"]`);
   const config = collectConfig(panel);
+  if (route !== "/api/run/train-only") {
+    // Everything except Train only ends in a Docker compile - check fresh
+    // (Docker may have just been started) and stop BEFORE a long training run.
+    const p = await refreshPrereqs();
+    if (p && !(p.docker_running && p.wheel_present)) {
+      appendLog(prereqProblem(p) + " (Train only doesn't need Docker.)", "error");
+      return;
+    }
+  }
+  if (route === "/api/run/compile-only" && !config.calib_npy) {
+    appendLog("Pick the calibration .npy (saved by training next to the .pth).", "error");
+    return;
+  }
   logEl.textContent = "";
   statusLoss.textContent = "";
   let res, data;
@@ -155,6 +175,45 @@ document.getElementById("compileonly_start").addEventListener("click", () => lau
 document.getElementById("compileonly_smoketest").addEventListener("click", () => launch("/api/run/smoketest-compile", "compile-only"));
 
 stopBtn.addEventListener("click", () => fetch("/api/stop", { method: "POST" }));
+
+// ── Docker / Hailo compiler reminder (always visible) ────────────────────
+
+const prereqBanner = document.getElementById("prereq-banner");
+let lastPrereqs = null;
+
+function prereqProblem(p) {
+  if (!p.docker_installed) return "Docker Desktop is not installed - compiling needs it (see INSTALL.md).";
+  if (!p.docker_running) return "Docker Desktop is not running - start it before Full or Compile.";
+  if (!p.wheel_present) return "Hailo compiler wheel missing in engine/compile/resources/ (see INSTALL.md).";
+  return null;
+}
+
+function renderPrereqs() {
+  if (!lastPrereqs) return;
+  const problem = prereqProblem(lastPrereqs);
+  const trainOnly = document.body.dataset.action === "train-only";
+  if (!problem) {
+    prereqBanner.className = "prereq-banner ok";
+    prereqBanner.textContent = "✓ Docker running · Hailo compiler ready";
+  } else if (trainOnly) {
+    prereqBanner.className = "prereq-banner info";
+    prereqBanner.textContent = problem + " (Train only doesn't need it.)";
+  } else {
+    prereqBanner.className = "prereq-banner warn";
+    prereqBanner.textContent = "⚠ " + problem;
+  }
+}
+
+async function refreshPrereqs() {
+  try {
+    lastPrereqs = await (await fetch("/api/prereqs")).json();
+    renderPrereqs();
+  } catch (e) { /* server busy/restarting - keep the last known state */ }
+  return lastPrereqs;
+}
+
+refreshPrereqs();
+setInterval(() => { if (!document.hidden) refreshPrereqs(); }, 5000);
 
 // ── Status bar / elapsed timer ───────────────────────────────────────────
 

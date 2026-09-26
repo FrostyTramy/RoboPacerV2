@@ -260,6 +260,7 @@ def _control_server_loop(stop_event):
                         "distance_m": round(live["distance_m"], 1),
                         "distance_target_m": live["distance_target_m"],
                         "stop_reason": live["stop_reason"],
+                        "pwm_us": round(live["pwm_us"], 1) if live["pwm_us"] is not None else None,
                     }
                     try:
                         conn.sendall((json.dumps(payload) + "\n").encode())

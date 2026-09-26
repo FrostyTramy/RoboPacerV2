@@ -16,9 +16,12 @@ selected with --speed-mode:
                 10-second pace-recovery loop as cruise_control.py, so the
                 *average* speed converges on the target even after
                 transients (curves, launch ramp).
-    controller  Target speed starts at 0.0 km/h. D-pad up/down adjusts it
-                live in 1 km/h steps (same regulator underneath as
-                cruise). --target-kmh is not accepted in this mode.
+    controller  Open-loop PWM, no odometry and no regulator: [A] engages at
+                neutral, then D-pad up/down moves the ESC pulse by
+                CONTROLLER_PWM_STEP_US (50 us) per press, from neutral up to
+                ESC_MAX_US. The speed sensor plays no part in the control
+                (it can't disengage this mode). --target-kmh is not
+                accepted in this mode.
     none        ESC stays at neutral for the entire run - only the model
                 steers. No D-pad throttle stepping either. Useful for
                 bench-testing the model or pushing the car by hand.
@@ -133,8 +136,8 @@ from config.cruise_config import (
     CRUISE_LAUNCH_SECONDS,
     CRUISE_MAX_PULSE_STEP_US_PER_S,
     CRUISE_SPEED_FILTER_TAU_S,
+    CONTROLLER_PWM_STEP_US,
     TARGET_SPEED_MAX_KMH,
-    TARGET_SPEED_STEP_KMH,
 )
 from config.ipc_config import MAIN_CONTROL_SOCKET, ODO_STALE_GRACE_SECONDS
 from config.pca9685_init import init_pca9685
@@ -207,6 +210,7 @@ def _format_pace_ms(pace_sec_per_km):
 _live_state = {
     "engaged": False, "speed_mode": "", "target_kmh": 0.0, "effective_target_kmh": 0.0,
     "kmh": 0.0, "distance_m": 0.0, "distance_target_m": None, "stop_reason": None,
+    "pwm_us": None,
 }
 _live_lock = threading.Lock()
 
@@ -294,6 +298,8 @@ def _format_final_summary(speed_mode, target_kmh, distance_target_m, elapsed_s, 
     distance_target_desc = f"{distance_target_m:.0f}m tinta" if distance_target_m is not None else "fara tinta (pana la oprire)"
     if speed_mode == "none":
         lines.append(f"Fara tinta de viteza (doar steering) | {distance_target_desc} | Durata: {elapsed_s:.1f}s")
+    elif speed_mode == "controller":
+        lines.append(f"PWM direct din D-pad (fara tinta de viteza) | Durata: {elapsed_s:.1f}s")
     else:
         lines.append(
             f"Tinta: {target_kmh:.1f} km/h ({_format_pace(target_kmh)}/km) | "
@@ -515,7 +521,8 @@ def main():
         if speed_mode == "cruise":
             print(f"Tinta: {target_kmh:.1f} km/h ({_format_pace(target_kmh)}/km). D-pad nu are efect.")
         elif speed_mode == "controller":
-            print("Tinta porneste de la 0 km/h. D-pad SUS/JOS ajusteaza tinta live.")
+            print(f"PWM direct, fara odometrie. [A] porneste de la neutru ({ESC_NEUTRAL_US} us), "
+                  f"apoi D-pad SUS/JOS = +/-{CONTROLLER_PWM_STEP_US:.0f} us pe apasare.")
         else:
             print("Fara tinta de viteza - ESC ramane la neutru, doar modelul da directia.")
         print(f"Distanta: {f'{distance_target_m:.0f}m' if distance_target_m is not None else 'fara tinta (ruleaza pana oprire)'}")
@@ -525,10 +532,7 @@ def main():
 
         engaged = False
         engage_time = 0.0
-        # Start of the "wheel isn't turning yet" grace period. Same as
-        # engage_time, except controller mode restarts it on every D-pad press
-        # so you can keep stepping the speed up until the car actually starts.
-        stale_grace_start = 0.0
+        pwm_offset_us = 0.0  # controller mode: microseconds above ESC_NEUTRAL_US
         integral = 0.0
         prev_pulse_us = ESC_NEUTRAL_US
         filtered_kmh = 0.0
@@ -564,22 +568,26 @@ def main():
                             for event in controller.read():
                                 if event.type == ecodes.EV_ABS and event.code == ecodes.ABS_HAT0Y:
                                     if speed_mode == "controller":
-                                        previous_target_kmh = target_kmh
+                                        pwm_step = 0.0
                                         if event.value == -1 and last_hat0y == 0:
-                                            target_kmh = min(TARGET_SPEED_MAX_KMH, target_kmh + TARGET_SPEED_STEP_KMH)
+                                            pwm_step = CONTROLLER_PWM_STEP_US
                                         elif event.value == 1 and last_hat0y == 0:
-                                            target_kmh = max(0.0, target_kmh - TARGET_SPEED_STEP_KMH)
+                                            pwm_step = -CONTROLLER_PWM_STEP_US
                                         last_hat0y = event.value
-                                        if target_kmh != previous_target_kmh:
-                                            stale_grace_start = time.time()
-                                            print(f"\nTinta: {target_kmh:.1f} km/h")
-                                            logging.info(f"D-pad: tinta {target_kmh:.1f} km/h")
+                                        if pwm_step and not engaged:
+                                            print("\nD-pad functioneaza dupa [A].")
+                                        elif pwm_step:
+                                            pwm_offset_us = max(0.0, min(float(ESC_MAX_US - ESC_NEUTRAL_US),
+                                                                         pwm_offset_us + pwm_step))
+                                            print(f"\nPWM: {ESC_NEUTRAL_US + pwm_offset_us:.0f} us "
+                                                  f"(+{pwm_offset_us:.0f})")
+                                            logging.info(f"D-pad: PWM {ESC_NEUTRAL_US + pwm_offset_us:.0f} us")
                                 elif event.type == ecodes.EV_KEY and event.value == 1:
                                     if event.code == BTN_ENGAGE:
                                         if not engaged:
                                             engaged = True
                                             engage_time = time.time()
-                                            stale_grace_start = engage_time
+                                            pwm_offset_us = 0.0  # always start from neutral
                                             leg_start_time = engage_time
                                             integral = 0.0
                                             prev_pulse_us = ESC_NEUTRAL_US
@@ -650,33 +658,23 @@ def main():
                         filtered_kmh += (raw_kmh - filtered_kmh) * filter_weight
                         kmh = filtered_kmh
                         # implicit - suprascris mai jos cat timp e angajat
-                        effective_target_kmh = target_kmh if speed_mode != "none" else 0.0
+                        effective_target_kmh = target_kmh if speed_mode == "cruise" else 0.0
 
                         if engaged:
                             # ESP32 tace cand roata sta (un singur RPM:0.00, apoi
                             # nimic), deci "stale" = masina oprita SAU senzor picat.
                             # In "none" ESC-ul nu e condus - nimic de protejat.
-                            past_grace = (now - stale_grace_start) > ODO_STALE_GRACE_SECONDS
-                            # Controller mode at target 0: neutral is commanded, so a
-                            # motionless wheel is expected, not a sensor failure.
-                            odo_stale = (speed_mode != "none" and past_grace and is_odo_stale()
-                                         and not (speed_mode == "controller" and target_kmh <= 0.0))
-                            if odo_stale and speed_mode == "cruise":
+                            # Only cruise regulates on the speed sensor. controller
+                            # is open-loop PWM and "none" doesn't drive the ESC, so
+                            # neither depends on (or is stopped by) odometry.
+                            past_grace = (now - engage_time) > ODO_STALE_GRACE_SECONDS
+                            if speed_mode == "cruise" and past_grace and is_odo_stale():
                                 engaged = False
                                 esc.neutral()
                                 prev_pulse_us = ESC_NEUTRAL_US
                                 stop_reason = "senzor de viteza indisponibil"
                                 logging.warning("Oprire automata: date RPM invechite")
                                 raise KeyboardInterrupt
-                            elif odo_stale:
-                                # controller: ca cruise_control.py pe main - doar
-                                # dezangajeaza, scriptul ramane pornit ([A] reia).
-                                engaged = False
-                                esc.neutral()
-                                prev_pulse_us = ESC_NEUTRAL_US
-                                print("\n!!! Senzor de viteza indisponibil / masina oprita - "
-                                      "dezangajat (apasa [A] ca sa reiei) !!!")
-                                logging.warning("Dezangajat automat: date RPM invechite")
                             else:
                                 prev_split_distance_m = distance_m
                                 distance_m += (kmh / 3.6) * dt
@@ -699,6 +697,9 @@ def main():
 
                                 if speed_mode == "none":
                                     effective_target_kmh = 0.0
+                                elif speed_mode == "controller":
+                                    prev_pulse_us = min(float(ESC_MAX_US), ESC_NEUTRAL_US + pwm_offset_us)
+                                    esc.set_pulse_us(prev_pulse_us)
                                 else:
                                     in_launch = (now - engage_time) <= CRUISE_LAUNCH_SECONDS
                                     max_step = (CRUISE_LAUNCH_MAX_PULSE_STEP_US_PER_S if in_launch
@@ -741,7 +742,8 @@ def main():
                                     raise KeyboardInterrupt
                         last_control_time = now
 
-                        _update_live(target_kmh=target_kmh, effective_target_kmh=effective_target_kmh,
+                        _update_live(pwm_us=prev_pulse_us if speed_mode != "none" else None,
+                                     target_kmh=target_kmh, effective_target_kmh=effective_target_kmh,
                                      kmh=kmh, engaged=engaged, distance_m=distance_m)
 
                         frame_counter += 1

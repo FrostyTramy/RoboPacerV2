@@ -344,7 +344,7 @@ def api_main_status():
     return jsonify(status or {
         "engaged": None, "speed_mode": None, "target_kmh": None, "effective_target_kmh": None,
         "kmh": None, "pace_sec_per_km": None, "distance_m": None, "distance_target_m": None,
-        "stop_reason": None,
+        "stop_reason": None, "pwm_us": None,
     })
 
 

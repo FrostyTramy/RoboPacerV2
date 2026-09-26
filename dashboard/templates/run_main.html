@@ -42,7 +42,7 @@
     <input type="text" id="target-kmh" value="8.0" inputmode="decimal">
   </div>
 
-  <div class="field-group">
+  <div class="field-group" id="distance-group">
     <label>Distanta tinta (m) - optional, gol = ruleaza pana la oprire</label>
     <input type="number" id="distance-m" min="{{ distance_min }}" max="{{ distance_max }}" step="1">
   </div>
@@ -65,6 +65,7 @@
     <div class="card"><div class="label">Mod</div><div class="value" id="tm-mode">--</div></div>
     <div class="card"><div class="label">km/h</div><div class="value" id="tm-kmh">--</div></div>
     <div class="card"><div class="label">Tinta</div><div class="value" id="tm-target">--</div></div>
+    <div class="card"><div class="label">PWM</div><div class="value" id="tm-pwm">--</div></div>
     <div class="card"><div class="label">Pace</div><div class="value" id="tm-pace">--</div></div>
     <div class="card"><div class="label">Distanta</div><div class="value" id="tm-distance">--</div></div>
   </div>
@@ -78,7 +79,7 @@
   const DISTANCE_MAX = {{ distance_max | tojson }};
   const MODE_HELP = {
     cruise: 'Model la volan, viteza fixa (media = tinta). D-pad inactiv. [A] porneste, [B] opreste.',
-    controller: 'Model la volan, viteza pornind de la 0 - D-pad sus/jos +/- 1 km/h. [A] porneste, [B] opreste. Daca masina sta pe loc ~2s se dezangajeaza singur (motor neutru) - [A] reia, cu distanta de la 0.',
+    controller: 'Model la volan, PWM direct (fara odometrie): [A] porneste de la neutru, apoi D-pad sus/jos = +/- 50 us pe apasare (max 1700). [B] opreste.',
     none: 'Doar steering-ul modelului - motorul ramane in neutru. [A] porneste, [B] opreste.',
   };
 
@@ -184,6 +185,8 @@
     currentMode = mode;
     modeButtons.forEach(b => b.classList.toggle('active', b.dataset.mode === mode));
     document.getElementById('target-kmh-group').classList.toggle('hidden', mode !== 'cruise');
+    // Distance is measured by the speed sensor, which controller mode doesn't use.
+    document.getElementById('distance-group').classList.toggle('hidden', mode === 'controller');
     document.getElementById('mode-help').textContent = MODE_HELP[mode];
   }
   modeButtons.forEach(btn => btn.addEventListener('click', () => setMode(btn.dataset.mode)));
@@ -222,7 +225,7 @@
         throw new Error(`Viteza tinta invalida (0.1 - ${TARGET_SPEED_MAX_KMH} km/h).`);
       }
     }
-    const distanceRaw = document.getElementById('distance-m').value;
+    const distanceRaw = currentMode === 'controller' ? '' : document.getElementById('distance-m').value;
     let distanceM = null;
     if (distanceRaw !== '') {
       distanceM = parseFloat(distanceRaw);
@@ -247,8 +250,9 @@
         ? '<span class="badge ok">DA</span>' : '<span class="badge muted">nu</span>';
       document.getElementById('tm-mode').textContent = t.speed_mode || '--';
       document.getElementById('tm-kmh').textContent = t.kmh != null ? t.kmh.toFixed(2) : '--';
-      document.getElementById('tm-target').textContent = t.effective_target_kmh != null
+      document.getElementById('tm-target').textContent = t.effective_target_kmh != null && t.speed_mode === 'cruise'
         ? t.effective_target_kmh.toFixed(1) + ' km/h' : '--';
+      document.getElementById('tm-pwm').textContent = t.pwm_us != null ? t.pwm_us.toFixed(0) + ' us' : '--';
       document.getElementById('tm-pace').textContent = t.pace_sec_per_km
         ? paceFromKmh(3600 / t.pace_sec_per_km) + '/km' : '--:--';
       document.getElementById('tm-distance').textContent = t.distance_m != null

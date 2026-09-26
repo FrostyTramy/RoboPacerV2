@@ -21,4 +21,8 @@ CRUISE_CATCHUP_WINDOW_S = 10.0
 CRUISE_CATCHUP_MAX_EXTRA_KMH = 3.0
 
 TARGET_SPEED_STEP_KMH = 1.0
+
+# main.py --speed-mode controller is open-loop PWM (no odometry): each D-pad
+# press moves the ESC pulse this many microseconds above/below neutral.
+CONTROLLER_PWM_STEP_US = 50.0
 TARGET_SPEED_MAX_KMH = 100.0  # real ceiling comes from ESC_MAX_US, see cruise_pi.py

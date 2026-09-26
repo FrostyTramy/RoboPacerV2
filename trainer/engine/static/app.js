@@ -77,11 +77,18 @@ async function validatePath(input) {
         resultEl.textContent = `✓ ${data.record_count} frames, ${data.format} (${data.frame_stack_n}-frame stack)`;
       } else if (kind === "pth") {
         resultEl.textContent = `✓ checkpoint OK (frame_stack_n=${data.frame_stack_n})`;
+        const panel = input.closest(".action-panel");
         // Training saves <name>_calib_data_nhwc.npy next to the .pth - pre-fill it.
-        const calibInput = input.closest(".action-panel").querySelector('[data-field="calib_npy"]');
-        if (calibInput && data.calib_npy && !calibInput.value.trim()) {
-          calibInput.value = data.calib_npy;
+        const calibInput = panel.querySelector('[data-field="calib_npy"]');
+        if (calibInput && data.calib_npy && autoFillable(calibInput)) {
+          autoFill(calibInput, data.calib_npy);
           validatePath(calibInput);
+        }
+        // Output name = the .pth's own name (models/<name>.pth -> <name>.hef).
+        const nameInput = panel.querySelector('[data-field="model_name"]');
+        const stem = path.split(/[\\/]/).pop().replace(/\.pth$/i, "");
+        if (nameInput && stem && autoFillable(nameInput)) {
+          autoFill(nameInput, stem);
         }
       } else if (kind === "npy") {
         resultEl.textContent = `✓ ${data.record_count} calibration samples (${data.frame_stack_n}-frame stack)`;
@@ -94,6 +101,17 @@ async function validatePath(input) {
     resultEl.className = "validate-result error";
     resultEl.textContent = "✗ validation request failed";
   }
+}
+
+// A field filled in from the picked .pth follows the next .pth picked too -
+// unless the user has typed their own value into it since.
+function autoFillable(el) {
+  return !el.value.trim() || el.value === el.dataset.autoFilled;
+}
+
+function autoFill(el, value) {
+  el.value = value;
+  el.dataset.autoFilled = value;
 }
 
 // ── Folder/file browse buttons ───────────────────────────────────────────

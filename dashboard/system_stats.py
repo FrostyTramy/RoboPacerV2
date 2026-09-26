@@ -24,6 +24,12 @@ MAIN_DIR = os.path.join(REPO_ROOT, "main")
 sys.path.append(REPO_ROOT)
 from config.ipc_config import MAIN_CONTROL_SOCKET, MANUAL_DRIVE_CONTROL_SOCKET, RELAY_SOCKET  # noqa: E402
 
+try:
+    from config.battery import read_battery  # INA219 over I2C (smbus2)
+except Exception:  # missing smbus2 etc. must never take the whole dashboard down
+    def read_battery():
+        return None
+
 _JOYSTICK_NAME_HINTS = ("xbox", "shanwan", "gamepad", "joystick", "controller")
 
 
@@ -190,4 +196,5 @@ def get_all_stats(hailo_allowed=True):
         "hailo_temp_c": get_hailo_temp(allowed=hailo_allowed),
         "controller": get_controller_status(),
         "esp32": get_esp32_status(),
+        "battery": read_battery(),
     }

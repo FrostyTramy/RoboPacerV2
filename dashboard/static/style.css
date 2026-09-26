@@ -213,3 +213,122 @@ h2 { font-size: 1.05rem; margin: 0 0 10px; color: var(--muted); font-weight: 600
   font-size: 0.85rem;
   user-select: none;
 }
+
+/* --- status bar cards: battery + relay switch ------------------------- */
+.status-bar .status-cards { margin-bottom: 0; }
+
+.battery-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border);
+  margin-top: 8px;
+  overflow: hidden;
+}
+.battery-bar span {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--ok);
+  transition: width 0.4s;
+}
+#sb-battery-card[data-level="low"] .value { color: var(--warn); }
+#sb-battery-card[data-level="low"] .battery-bar span { background: var(--warn); }
+#sb-battery-card[data-level="empty"] .value { color: var(--bad); }
+#sb-battery-card[data-level="empty"] .battery-bar span { background: var(--bad); }
+#sb-battery-card[data-level="none"] .value { color: var(--muted); }
+
+.relay-card {
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 8px;
+}
+.relay-card:disabled { cursor: not-allowed; }
+.relay-card.unavailable { border-color: var(--bad); }
+.relay-card.unavailable .label { color: var(--bad); }
+.relay-card.on { border-color: var(--ok); }
+.relay-card.busy { opacity: 0.6; }
+
+.switch {
+  position: relative;
+  width: 52px;
+  height: 28px;
+  border-radius: 999px;
+  background: var(--border);
+  transition: background 0.2s;
+}
+.switch .knob {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--text);
+  transition: transform 0.2s;
+}
+.relay-card.on .switch { background: var(--ok); }
+.relay-card.on .switch .knob { transform: translateX(24px); }
+.relay-card.unavailable .switch { opacity: 0.35; }
+
+/* --- Bluetooth panel (shares the WiFi panel's look) -------------------- */
+.bt-actions { display: flex; gap: 6px; }
+.wifi-item.static { cursor: default; }
+.wifi-item.static:hover { border-color: var(--border); }
+.wifi-item .info { display: flex; flex-direction: column; min-width: 0; }
+.wifi-item .info .ssid { overflow: hidden; text-overflow: ellipsis; }
+.panel-subtitle { color: var(--muted); font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; margin: 14px 0 0; }
+.top-actions { display: flex; gap: 8px; }
+
+/* --- file browser window (model picker) -------------------------------- */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  z-index: 50;
+}
+.modal {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  width: 100%;
+  max-width: 520px;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  padding: 14px;
+  gap: 10px;
+}
+.modal h2 { margin: 0; }
+.fs-path {
+  font-family: "SF Mono", Consolas, monospace;
+  font-size: 0.8rem;
+  color: var(--muted);
+  word-break: break-all;
+}
+.fs-shortcuts { display: flex; flex-wrap: wrap; gap: 6px; }
+.fs-list { overflow-y: auto; display: flex; flex-direction: column; gap: 6px; min-height: 120px; }
+.fs-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 9px 12px;
+  cursor: pointer;
+  word-break: break-all;
+}
+.fs-item:hover { border-color: var(--accent); }
+.fs-item.hef { border-color: rgba(79, 140, 255, 0.5); }
+.fs-item .meta { color: var(--muted); font-size: 0.78rem; white-space: nowrap; }
+.model-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }

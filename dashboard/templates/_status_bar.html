@@ -1,19 +1,25 @@
 <!--
-  Shared on every page: relay state + OFF, which script is running + Stop.
+  Shared on every page: battery, relay switch, which script is running + Stop.
   Fed by /api/stream/status (1s). A page can define onStatus(payload) to
   react to the same data (stats cards, hiding its Start form, ...).
 
-  No relay ON button on purpose: each script turns the relay on itself at
-  Start, after the ESC's neutral signal is already running (see /api/relay).
+  The Releu card is one big switch: tap = toggle. OFF cuts motor power and
+  stops the running script. ON is only accepted with nothing running - and a
+  Start that finds the relay already ON power-cycles it first (see /api/relay
+  and /api/start).
 -->
 <div class="status-bar" id="status-bar">
-  <div class="status-bar-row">
-    <span class="label">Releu</span>
-    <span class="badge muted" id="sb-relay">--</span>
-    <button class="btn small danger" id="sb-relay-off">Opreste releu</button>
+  <div class="grid status-cards">
+    <div class="card" id="sb-battery-card">
+      <div class="label">Baterie</div>
+      <div class="value" id="sb-battery">--</div>
+      <div class="battery-bar"><span id="sb-battery-fill"></span></div>
+    </div>
+    <button type="button" class="card relay-card unavailable" id="sb-relay-card" disabled>
+      <div class="label">Releu</div>
+      <span class="switch"><span class="knob"></span></span>
+    </button>
   </div>
-  <div class="status-line muted-text">Releul porneste singur la Start (dupa ce ESC-ul primeste semnal neutru).
-    Opreste releu = taie curentul si opreste scriptul care ruleaza.</div>
   <div class="status-bar-row">
     <span class="label">Script</span>
     <span id="sb-running">--</span>
@@ -32,24 +38,46 @@
   }
 
   (function () {
-    const relayEl = document.getElementById('sb-relay');
+    const batteryCard = document.getElementById('sb-battery-card');
+    const batteryEl = document.getElementById('sb-battery');
+    const batteryFill = document.getElementById('sb-battery-fill');
+    const relayCard = document.getElementById('sb-relay-card');
     const runningEl = document.getElementById('sb-running');
     const stopBtn = document.getElementById('sb-stop');
-    const relayOffBtn = document.getElementById('sb-relay-off');
     const errEl = document.getElementById('sb-error');
 
-    function render(payload) {
-      const esp32 = (payload.stats && payload.stats.esp32) || {};
-      if (!esp32.service_running) {
-        relayEl.className = 'badge bad';
-        relayEl.textContent = 'estop_listener oprit';
-      } else if (!esp32.esp32_connected) {
-        relayEl.className = 'badge bad';
-        relayEl.textContent = 'ESP32 deconectat';
-      } else {
-        relayEl.className = 'badge ' + (esp32.relay_on ? 'ok' : 'muted');
-        relayEl.textContent = esp32.relay_on ? 'ON' : 'OFF';
+    const RELAY_ERRORS = {
+      script_running: 'Un script ruleaza - releul e condus de script.',
+      esp32_unavailable: 'ESP32 deconectat.',
+    };
+
+    let relayOn = null;   // null = unknown / unavailable
+    let busy = false;
+
+    function renderBattery(b) {
+      const level = b ? b.level : 'none';
+      batteryCard.dataset.level = level;
+      if (!b || b.percent == null) {
+        batteryEl.textContent = b ? b.voltage_v.toFixed(1) + ' V' : '--';
+        batteryFill.style.width = '0%';
+        return;
       }
+      batteryEl.textContent = `${b.voltage_v.toFixed(1)} V · ${b.percent}%`;
+      batteryFill.style.width = b.percent + '%';
+    }
+
+    function render(payload) {
+      const stats = payload.stats || {};
+      const esp32 = stats.esp32 || {};
+      renderBattery(stats.battery);
+
+      const available = !!esp32.service_running && !!esp32.esp32_connected;
+      relayOn = available ? !!esp32.relay_on : null;
+      relayCard.classList.toggle('unavailable', !available);
+      relayCard.classList.toggle('on', relayOn === true);
+      relayCard.disabled = !available || busy;
+      relayCard.title = !available
+        ? (esp32.service_running ? 'ESP32 deconectat' : 'estop_listener oprit') : '';
 
       const running = payload.running;
       stopBtn.classList.toggle('hidden', !running);
@@ -64,26 +92,31 @@
       if (typeof onStatus === 'function') onStatus(payload);
     }
 
-    function action(btn, busyText, url, body) {
+    function post(url, body) {
       errEl.textContent = '';
-      const label = btn.textContent;
-      btn.textContent = busyText;
-      relayOffBtn.disabled = stopBtn.disabled = true;
       return fetch(url, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body || {}),
       }).then(r => r.json()).then(data => {
-        if (!data.ok) errEl.textContent = 'Eroare: ' + (data.error || 'necunoscuta');
-      }).catch(() => { errEl.textContent = 'Eroare de retea.'; })
-        .finally(() => {
-          btn.textContent = label;
-          relayOffBtn.disabled = stopBtn.disabled = false;
-        });
+        if (!data.ok) errEl.textContent = 'Eroare: ' + (RELAY_ERRORS[data.error] || data.error || 'necunoscuta');
+      }).catch(() => { errEl.textContent = 'Eroare de retea.'; });
     }
 
-    // Relay OFF cuts motor power and stops whatever script is running.
-    relayOffBtn.addEventListener('click', () => action(relayOffBtn, 'Se opreste...', '/api/relay', { on: false }));
-    stopBtn.addEventListener('click', () => action(stopBtn, 'Se opreste...', '/api/stop'));
+    // Tap the card: ON -> OFF (cuts power, stops the script), OFF -> ON.
+    relayCard.addEventListener('click', () => {
+      if (relayOn === null || busy) return;
+      busy = true;
+      relayCard.disabled = true;
+      relayCard.classList.add('busy');
+      post('/api/relay', { on: !relayOn }).finally(() => {
+        busy = false;
+        relayCard.classList.remove('busy');
+      });
+    });
+    stopBtn.addEventListener('click', () => {
+      stopBtn.disabled = true;
+      post('/api/stop').finally(() => { stopBtn.disabled = false; });
+    });
 
     let stream = null;
     function open() {

@@ -12,7 +12,10 @@
       <h1>RoboPacerV2</h1>
       <div class="status-line" id="clock"></div>
     </div>
-    <button class="btn secondary" id="wifi-toggle">WiFi</button>
+    <div class="top-actions">
+      <button class="btn secondary" id="wifi-toggle">WiFi</button>
+      <button class="btn secondary" id="bt-toggle">Bluetooth</button>
+    </div>
   </div>
 
   <div id="wifi-panel" class="wifi-panel hidden">
@@ -31,6 +34,20 @@
       <button class="btn small secondary" id="wifi-cancel-btn">Anuleaza</button>
       <div class="status-line" id="wifi-connect-status"></div>
     </div>
+  </div>
+
+  <div id="bt-panel" class="wifi-panel hidden">
+    <h2>Bluetooth</h2>
+    <div class="status-line" id="bt-adapter">Se verifica...</div>
+
+    <div class="panel-subtitle">Dispozitive salvate</div>
+    <div class="wifi-list" id="bt-saved"></div>
+
+    <div class="panel-subtitle">Dispozitive noi</div>
+    <button class="btn small" id="bt-scan-btn" style="margin-top: 8px;">Scaneaza</button>
+    <div class="status-line" id="bt-scan-status"></div>
+    <div class="wifi-list" id="bt-found"></div>
+    <div class="status-line error-text" id="bt-error"></div>
   </div>
 
   {% include "_status_bar.html" %}
@@ -96,7 +113,10 @@
     const wifiPanel = document.getElementById('wifi-panel');
     document.getElementById('wifi-toggle').addEventListener('click', () => {
       wifiPanel.classList.toggle('hidden');
-      if (!wifiPanel.classList.contains('hidden')) refreshWifiStatus();
+      if (!wifiPanel.classList.contains('hidden')) {
+        closeBtPanel();
+        refreshWifiStatus();
+      }
     });
 
     function refreshWifiStatus() {
@@ -154,6 +174,124 @@
         statusEl.textContent = data.ok ? 'Conectat!' : ('Eroare: ' + data.error);
         if (data.ok) refreshWifiStatus();
       }).catch(() => { statusEl.textContent = 'Eroare de retea la conectare.'; });
+    });
+
+    // --- Bluetooth panel: saved devices + scan, like a phone's settings ---
+    const btPanel = document.getElementById('bt-panel');
+    const btSavedEl = document.getElementById('bt-saved');
+    const btFoundEl = document.getElementById('bt-found');
+    const btErrEl = document.getElementById('bt-error');
+    let btTimer = null;
+    let btBusy = false;        // a scan/pair/connect is in flight - don't redraw under it
+    let btSavedJson = null;
+
+    function closeBtPanel() {
+      btPanel.classList.add('hidden');
+      if (btTimer) { clearInterval(btTimer); btTimer = null; }
+    }
+
+    document.getElementById('bt-toggle').addEventListener('click', () => {
+      if (!btPanel.classList.contains('hidden')) { closeBtPanel(); return; }
+      wifiPanel.classList.add('hidden');
+      btPanel.classList.remove('hidden');
+      refreshBt();
+      // Devices connect/disconnect on their own (controller switched on/off).
+      btTimer = setInterval(() => { if (!document.hidden && !btBusy) refreshBt(); }, 4000);
+    });
+
+    function btPost(action, mac) {
+      return fetch('/api/bluetooth/' + action, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mac }),
+      }).then(r => r.json());
+    }
+
+    function btButton(label, cls, handler) {
+      const b = document.createElement('button');
+      b.className = 'btn small ' + cls;
+      b.textContent = label;
+      b.addEventListener('click', (e) => { e.stopPropagation(); handler(b); });
+      return b;
+    }
+
+    // Runs one device action with a status message, then redraws the saved list.
+    function btRun(action, mac, message, after) {
+      if (btBusy) return;
+      btBusy = true;
+      btErrEl.textContent = '';
+      document.getElementById('bt-scan-status').textContent = message;
+      btPost(action, mac).then(data => {
+        if (!data.ok) btErrEl.textContent = 'Eroare: ' + (data.error || 'necunoscuta');
+        else if (after) after();
+      }).catch(() => { btErrEl.textContent = 'Eroare de retea.'; })
+        .finally(() => {
+          btBusy = false;
+          document.getElementById('bt-scan-status').textContent = '';
+          btSavedJson = null;
+          refreshBt();
+        });
+    }
+
+    function refreshBt() {
+      fetch('/api/bluetooth/devices').then(r => r.json()).then(data => {
+        const adapterEl = document.getElementById('bt-adapter');
+        if (!data.ok) { adapterEl.textContent = 'Eroare: ' + data.error; return; }
+        adapterEl.textContent = data.powered ? 'Bluetooth pornit' : 'Bluetooth oprit (pornesc la scanare)';
+        const json = JSON.stringify(data.devices);
+        if (json === btSavedJson) return;
+        btSavedJson = json;
+        btSavedEl.innerHTML = '';
+        if (!data.devices.length) {
+          btSavedEl.innerHTML = '<div class="status-line">Niciun dispozitiv salvat.</div>';
+          return;
+        }
+        data.devices.forEach(dev => {
+          const item = document.createElement('div');
+          item.className = 'wifi-item static';
+          item.innerHTML = `<span class="info"><span class="ssid">${escapeHtml(dev.name)}</span>` +
+            `<span class="meta">${dev.connected ? 'conectat' : 'neconectat'}</span></span>`;
+          const actions = document.createElement('span');
+          actions.className = 'bt-actions';
+          actions.appendChild(dev.connected
+            ? btButton('Deconecteaza', 'secondary', () => btRun('disconnect', dev.mac, 'Se deconecteaza...'))
+            : btButton('Conecteaza', '', () => btRun('connect', dev.mac, 'Se conecteaza...')));
+          actions.appendChild(btButton('Uita', 'danger', () => {
+            if (confirm(`Uiti "${dev.name}"? Va trebui imperecheat din nou.`)) {
+              btRun('forget', dev.mac, 'Se sterge...');
+            }
+          }));
+          item.appendChild(actions);
+          btSavedEl.appendChild(item);
+        });
+      }).catch(() => {});
+    }
+
+    document.getElementById('bt-scan-btn').addEventListener('click', () => {
+      if (btBusy) return;
+      const statusEl = document.getElementById('bt-scan-status');
+      const scanBtn = document.getElementById('bt-scan-btn');
+      btBusy = true;
+      scanBtn.disabled = true;
+      btErrEl.textContent = '';
+      btFoundEl.innerHTML = '';
+      statusEl.textContent = 'Scanare... (~8s) Pune dispozitivul in modul de imperechere.';
+      fetch('/api/bluetooth/scan', { method: 'POST' }).then(r => r.json()).then(data => {
+        if (!data.ok) { statusEl.textContent = ''; btErrEl.textContent = 'Eroare: ' + data.error; return; }
+        statusEl.textContent = data.devices.length ? `${data.devices.length} dispozitive gasite` : 'Niciun dispozitiv nou gasit.';
+        data.devices.forEach(dev => {
+          const item = document.createElement('div');
+          item.className = 'wifi-item';
+          item.innerHTML = `<span class="ssid">${escapeHtml(dev.name)}</span>` +
+            `<span class="meta">${dev.rssi != null ? escapeHtml(dev.rssi) + ' dBm' : ''}</span>`;
+          item.addEventListener('click', () => {
+            btBusy = false;   // hand over from the scan to the pairing
+            btFoundEl.innerHTML = '';
+            btRun('pair', dev.mac, `Se imperecheaza cu ${dev.name}...`);
+          });
+          btFoundEl.appendChild(item);
+        });
+      }).catch(() => { statusEl.textContent = ''; btErrEl.textContent = 'Eroare de retea la scanare.'; })
+        .finally(() => { btBusy = false; scanBtn.disabled = false; refreshBt(); });
     });
   </script>
 </body>

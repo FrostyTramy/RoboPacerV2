@@ -20,7 +20,9 @@ CONSOLE_LINES lines of the current run, then new lines as they're written
 console survives a restart of this process (systemd Restart=always).
 
 Relay safety: every script turns the relay ON at start and OFF in its own
-`finally`. Stopping from here (SIGTERM, grace period, then SIGKILL) also
+`finally`. The relay card can also switch it ON by hand (only with nothing
+running); a Start that finds it already ON power-cycles it first - see
+api_relay/api_start. Stopping from here (SIGTERM, grace period, then SIGKILL) also
 sends RELAY_OFF afterwards, so the motor loses power even if the script had
 to be killed. Turning the relay OFF from here cuts power first, then stops
 the running script - and safety/estop_listener.py independently kills every
@@ -40,6 +42,8 @@ import time
 import psutil
 from flask import Flask, Response, jsonify, render_template, request
 
+import bluetooth_devices
+import filebrowser
 import system_stats
 import wifi
 
@@ -296,7 +300,8 @@ def run_page(script_id):
     if script is None:
         return f"Script necunoscut: {script_id}", 404
     return render_template(script["template"], script=script, target_speed_max_kmh=TARGET_SPEED_MAX_KMH,
-                            distance_min=DISTANCE_M_MIN, distance_max=DISTANCE_M_MAX)
+                            distance_min=DISTANCE_M_MIN, distance_max=DISTANCE_M_MAX,
+                            main_dir=os.path.join(REPO_ROOT, "main"))
 
 
 @app.route("/api/status")
@@ -382,7 +387,16 @@ def _main_args(data):
     if display is None:
         return None, ("invalid_display", 400)
 
+    # Optional model picked in the file browser; absent = main/'s own .hef.
+    hef_path = data.get("hef_path")
+    if hef_path is not None:
+        hef_path = filebrowser.resolve_hef(hef_path)
+        if hef_path is None:
+            return None, ("invalid_hef_path", 400)
+
     args = ["--speed-mode", speed_mode]
+    if hef_path is not None:
+        args += ["--hef", hef_path]
     if speed_mode == "cruise":
         args += ["--target-kmh", str(target_kmh)]
     if distance_m is not None:
@@ -430,6 +444,27 @@ ARG_BUILDERS = {
 }
 
 
+RELAY_CYCLE_WAIT_SECONDS = 3.0
+RELAY_CYCLE_SETTLE_SECONDS = 1.0
+
+
+def _cycle_relay_if_on():
+    """A script only powers the ESC up correctly from a cold start (neutral
+    signal running first, THEN relay ON) - and the ESP32 ignores RELAY_ON
+    while already ON. So if the relay was left ON (switched on by hand from
+    the card, or by a script that died), cut it now, before the script exists:
+    the ESP32's !!ESTOP!! from this OFF then has nothing to kill, and the
+    script's own RELAY_ON is a real power-up. Caller holds _action_lock."""
+    if not system_stats.get_esp32_status().get("relay_on"):
+        return
+    logging.info("Relay was ON at Start - power-cycling it first")
+    relay_cmd("RELAY_OFF")
+    deadline = time.time() + RELAY_CYCLE_WAIT_SECONDS
+    while time.time() < deadline and system_stats.get_esp32_status().get("relay_on"):
+        time.sleep(0.1)
+    time.sleep(RELAY_CYCLE_SETTLE_SECONDS)  # let the listener finish handling that ESTOP
+
+
 @app.route("/api/start", methods=["POST"])
 def api_start():
     data = request.get_json(force=True, silent=True) or {}
@@ -456,6 +491,8 @@ def api_start():
             # main.py's own VDevice() would fail and abort the run.
             if not system_stats.wait_hailo_idle():
                 return jsonify({"error": "hailo_busy"}), 503
+
+            _cycle_relay_if_on()
 
             os.makedirs(RUN_LOGS_DIR, exist_ok=True)
             log_file = open(log_path_for(script_id), "wb", buffering=0)
@@ -488,20 +525,31 @@ def api_stop():
 @app.route("/api/relay", methods=["POST"])
 def api_relay():
     data = request.get_json(force=True, silent=True) or {}
-    # OFF only. There is no manual ON: the scripts turn the relay on themselves
-    # at Start, only AFTER the ESC's neutral PWM is already running. Powering
-    # the ESC any other way (no script, or a script still initialising or
-    # already shutting down) leaves it powered without a signal - the QuicRun
-    # then goes into failsafe and won't arm until a power cycle, which a later
-    # Start can't give (the ESP32 ignores RELAY_ON while already ON).
-    if data.get("on") is not False:
-        return jsonify({"error": "only_off_supported"}), 400
+    on = data.get("on")
+    if not isinstance(on, bool):
+        return jsonify({"error": "invalid_on"}), 400
     with _action_lock:
-        # Power off first (instant), then stop the script cleanly.
-        relay_cmd("RELAY_OFF")
-        logging.info("Relay OFF from dashboard")
-        stopped = _stop_current("relay turned off")
-    return jsonify({"ok": True, "stopped": stopped})
+        if not on:
+            # Power off first (instant), then stop the script cleanly.
+            relay_cmd("RELAY_OFF")
+            logging.info("Relay OFF from dashboard")
+            stopped = _stop_current("relay turned off")
+            return jsonify({"ok": True, "stopped": stopped})
+
+        # Manual ON - only with nothing running: a running script owns the
+        # relay (and a Start powers it up itself, in the right order).
+        # NOTE: with no script running the watchdog holds the ESC channel at
+        # "no signal", so a manually powered ESC (QuicRun) sits in failsafe -
+        # api_start therefore power-cycles the relay before launching anything.
+        if _status_payload() is not None:
+            return jsonify({"error": "script_running"}), 409
+        esp32 = system_stats.get_esp32_status()
+        if not esp32.get("service_running") or not esp32.get("esp32_connected"):
+            return jsonify({"error": "esp32_unavailable"}), 503
+        if not esp32.get("relay_on"):
+            relay_cmd("RELAY_ON")
+            logging.info("Relay ON from dashboard")
+        return jsonify({"ok": True})
 
 
 @app.route("/api/stream/log/<script_id>")
@@ -635,6 +683,68 @@ def stream_status():
             time.sleep(STATUS_STREAM_INTERVAL_SECONDS)
 
     return Response(generate(), mimetype="text/event-stream")
+
+
+# ---------------------------------------------------------------------------
+# File browser for the model picker (main page) - read-only, see filebrowser.py
+# ---------------------------------------------------------------------------
+
+@app.route("/api/fs/list")
+def api_fs_list():
+    listing, err = filebrowser.list_dir(request.args.get("path") or os.path.expanduser("~"))
+    if err is not None:
+        return jsonify({"ok": False, "error": err}), 400
+    return jsonify({"ok": True, **listing})
+
+
+# ---------------------------------------------------------------------------
+# Bluetooth - saved devices, scan, connect/forget (see bluetooth_devices.py)
+# ---------------------------------------------------------------------------
+
+def _bt_mac(data):
+    mac = data.get("mac")
+    mac = mac.upper() if isinstance(mac, str) else mac
+    return mac if bluetooth_devices.valid_mac(mac) else None
+
+
+@app.route("/api/bluetooth/devices")
+def api_bluetooth_devices():
+    status = bluetooth_devices.adapter_status()
+    if not status["ok"]:
+        return jsonify({"ok": False, "error": status["error"]})
+    return jsonify({"ok": True, "powered": status["powered"], "devices": bluetooth_devices.list_paired()})
+
+
+@app.route("/api/bluetooth/scan", methods=["POST"])
+def api_bluetooth_scan():
+    try:
+        found, err = bluetooth_devices.scan()
+    except bluetooth_devices.Busy:
+        return jsonify({"ok": False, "error": "Alta operatie Bluetooth e in curs."}), 409
+    if err is not None:
+        return jsonify({"ok": False, "error": err}), 503
+    return jsonify({"ok": True, "devices": found})
+
+
+@app.route("/api/bluetooth/<action>", methods=["POST"])
+def api_bluetooth_action(action):
+    actions = {
+        "pair": bluetooth_devices.pair_and_connect,
+        "connect": bluetooth_devices.connect,
+        "disconnect": bluetooth_devices.disconnect,
+        "forget": bluetooth_devices.forget,
+    }
+    fn = actions.get(action)
+    if fn is None:
+        return jsonify({"ok": False, "error": "unknown_action"}), 404
+    mac = _bt_mac(request.get_json(force=True, silent=True) or {})
+    if mac is None:
+        return jsonify({"ok": False, "error": "invalid_mac"}), 400
+    try:
+        ok, err = fn(mac)
+    except bluetooth_devices.Busy:
+        return jsonify({"ok": False, "error": "Alta operatie Bluetooth e in curs."}), 409
+    return jsonify({"ok": True}) if ok else (jsonify({"ok": False, "error": err}), 502)
 
 
 # ---------------------------------------------------------------------------

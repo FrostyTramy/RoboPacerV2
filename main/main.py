@@ -170,7 +170,13 @@ BTN_STOP = ecodes.BTN_B
 SPEED_MODES = ("cruise", "controller", "none")
 
 
-def find_hef_path():
+def find_hef_path(explicit=None):
+    """--hef PATH (picked in the dashboard) wins; without it, the one .hef
+    next to this script, as before."""
+    if explicit:
+        if not (explicit.endswith(".hef") and os.path.isfile(explicit)):
+            raise RuntimeError(f"Modelul ales nu exista sau nu e un fisier .hef: {explicit}")
+        return explicit
     hefs = [f for f in os.listdir(BASE_DIR) if f.endswith(".hef")]
     if len(hefs) == 0:
         raise RuntimeError(f"Niciun fisier .hef gasit in {BASE_DIR}. Pune exact un model acolo.")
@@ -371,6 +377,9 @@ def parse_args():
                           "(implicit: raw)")
     ap.add_argument("--display", action="store_true",
                      help="Deschide o fereastra cv2 de preview live")
+    ap.add_argument("--hef", metavar="PATH", default=None,
+                     help="Model .hef de folosit (cale absoluta, oriunde pe Pi). Implicit: "
+                          "singurul .hef din folderul main/")
     args = ap.parse_args()
 
     if args.speed_mode == "cruise":
@@ -444,7 +453,7 @@ def main():
             logging.warning(f"Rumble esuat: {e}")
 
     try:
-        hef_path = find_hef_path()
+        hef_path = find_hef_path(args.hef)
         model_name = os.path.basename(hef_path)
         print(f"[Hailo] Model: {model_name}")
         hef = HEF(hef_path)

@@ -4,6 +4,26 @@
   <div class="card" style="margin-bottom: 16px;">
     <div class="label">Model (.hef)</div>
     <div class="value" id="model-info">se verifica...</div>
+    <div class="status-line" id="model-source" style="margin-bottom: 0;"></div>
+    <div class="model-actions">
+      <button type="button" class="btn small secondary" id="model-browse">Alege alt model</button>
+      <button type="button" class="btn small secondary hidden" id="model-reset">Foloseste modelul din main</button>
+    </div>
+  </div>
+
+  <div class="modal-backdrop hidden" id="fs-modal">
+    <div class="modal">
+      <h2>Alege model (.hef)</h2>
+      <div class="fs-path" id="fs-path"></div>
+      <div class="fs-shortcuts">
+        <button type="button" class="btn small secondary" data-go="home">Acasa</button>
+        <button type="button" class="btn small secondary" data-go="main">Folderul main</button>
+        <button type="button" class="btn small secondary" data-go="root">/ (radacina)</button>
+      </div>
+      <div class="fs-list" id="fs-list"></div>
+      <div class="status-line error-text" id="fs-error"></div>
+      <button type="button" class="btn small secondary" id="fs-cancel">Anuleaza</button>
+    </div>
   </div>
 
   <h2>Mod viteza</h2>
@@ -62,17 +82,100 @@
     none: 'Doar steering-ul modelului - motorul ramane in neutru. [A] porneste, [B] opreste.',
   };
 
-  // --- Model info -----------------------------------------------------
-  fetch('/api/main/model_info').then(r => r.json()).then(data => {
+  // --- Model: the .hef in main/ unless one is picked in the file browser ---
+  const MAIN_DIR = {{ main_dir | tojson }};
+  let defaultModel = null;   // /api/main/model_info result
+  let chosenHef = null;      // absolute path picked by the user, or null
+
+  function baseName(path) { return path.slice(path.lastIndexOf('/') + 1); }
+  function dirName(path) { return path.slice(0, path.lastIndexOf('/')) || '/'; }
+
+  function renderModel() {
     const el = document.getElementById('model-info');
-    if (data.ok) {
-      el.textContent = data.model_name;
-    } else {
-      el.innerHTML = `<span class="error-text">${escapeHtml(data.error)}</span>`;
+    const src = document.getElementById('model-source');
+    document.getElementById('model-reset').classList.toggle('hidden', !chosenHef);
+    if (chosenHef) {
+      el.textContent = baseName(chosenHef);
+      src.textContent = dirName(chosenHef);
+      modelBlocked = false;
+    } else if (defaultModel && defaultModel.ok) {
+      el.textContent = defaultModel.model_name;
+      src.textContent = 'din folderul main';
+      modelBlocked = false;
+    } else if (defaultModel) {
+      el.innerHTML = `<span class="error-text">${escapeHtml(defaultModel.error)}</span>`;
+      src.textContent = 'Alege un model cu butonul de mai jos.';
       modelBlocked = true;
-      refreshStartButton();
     }
+    refreshStartButton();
+  }
+
+  fetch('/api/main/model_info').then(r => r.json()).then(data => {
+    defaultModel = data;
+    renderModel();
   });
+  document.getElementById('model-reset').addEventListener('click', () => { chosenHef = null; renderModel(); });
+
+  // --- File browser window: pick any .hef on the Pi ------------------------
+  const fsModal = document.getElementById('fs-modal');
+  const fsListEl = document.getElementById('fs-list');
+  const fsErrEl = document.getElementById('fs-error');
+  let fsLastDir = null;
+
+  function fsOpen(path) {
+    fsErrEl.textContent = '';
+    fetch('/api/fs/list' + (path ? '?path=' + encodeURIComponent(path) : '')).then(r => r.json()).then(d => {
+      if (!d.ok) {
+        fsErrEl.textContent = d.error === 'permission_denied' ? 'Fara acces la folderul asta.' : 'Nu pot deschide folderul.';
+        return;
+      }
+      fsLastDir = d.path;
+      document.getElementById('fs-path').textContent = d.path;
+      fsListEl.innerHTML = '';
+      const addItem = (text, meta, cls, onClick) => {
+        const item = document.createElement('div');
+        item.className = 'fs-item ' + cls;
+        const name = document.createElement('span');
+        name.textContent = text;
+        item.appendChild(name);
+        if (meta) {
+          const m = document.createElement('span');
+          m.className = 'meta';
+          m.textContent = meta;
+          item.appendChild(m);
+        }
+        item.addEventListener('click', onClick);
+        fsListEl.appendChild(item);
+      };
+      if (d.parent) addItem('\u2191  ..  (folder parinte)', '', 'dir', () => fsOpen(d.parent));
+      d.entries.forEach(e => {
+        const full = (d.path === '/' ? '' : d.path) + '/' + e.name;
+        if (e.type === 'dir') {
+          addItem('\u25B8  ' + e.name, '', 'dir', () => fsOpen(full));
+        } else {
+          addItem(e.name, (e.size / 1048576).toFixed(1) + ' MB', 'hef', () => {
+            chosenHef = full;
+            fsModal.classList.add('hidden');
+            renderModel();
+          });
+        }
+      });
+      if (!d.entries.length) fsListEl.insertAdjacentHTML('beforeend', '<div class="status-line">Niciun folder sau .hef aici.</div>');
+      if (d.truncated) fsListEl.insertAdjacentHTML('beforeend', '<div class="status-line">Lista e taiata (prea multe intrari).</div>');
+      fsListEl.scrollTop = 0;
+    }).catch(() => { fsErrEl.textContent = 'Eroare de retea.'; });
+  }
+
+  document.getElementById('model-browse').addEventListener('click', () => {
+    fsModal.classList.remove('hidden');
+    fsOpen(fsLastDir || (chosenHef ? dirName(chosenHef) : null));
+  });
+  document.getElementById('fs-cancel').addEventListener('click', () => fsModal.classList.add('hidden'));
+  fsModal.addEventListener('click', (e) => { if (e.target === fsModal) fsModal.classList.add('hidden'); });
+  fsModal.querySelectorAll('[data-go]').forEach(btn => btn.addEventListener('click', () => {
+    const go = btn.dataset.go;
+    fsOpen(go === 'main' ? MAIN_DIR : go === 'root' ? '/' : null);
+  }));
 
   // --- Mode switch + km/h<->pace toggle --------------------------------
   let currentMode = 'cruise';
@@ -133,6 +236,7 @@
       distance_m: distanceM,
       raw_steering: document.getElementById('raw-steering').checked,
       display: document.getElementById('display').checked,
+      hef_path: chosenHef,
     };
   }
 

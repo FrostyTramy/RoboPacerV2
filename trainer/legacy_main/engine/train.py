@@ -1,0 +1,904 @@
+"""
+RoboPacerV2 Trainer - training + export module.
+Runs on Windows (or any machine with a GPU/CPU + Docker). Called by
+server.py, or standalone via `python train.py --json ... --name mycar`.
+
+Design goal: the .hef this produces must match, pixel-for-pixel, what feeds
+the model at inference time on the Pi. There are now two Pi-side scripts
+that run inference - RoboPacerV2/model_runner/model_runner.py (steering
+only) and RoboPacerV2/main/main.py (steering + cruise-control speed) - but
+main.py's preprocessing is a verbatim copy of model_runner.py's, so both
+stay in lockstep with load_and_preprocess() below automatically as long as
+that copy is kept exact (same decode-to-RGB, same cv2.resize/INTER_LINEAR
+with no anti-aliasing, same normalize math). If you ever change the
+preprocessing on either side, change it in load_and_preprocess() here AND
+in both Pi scripts - a silent mismatch here doesn't error, it just quietly
+caps the model's real-world accuracy.
+"""
+import argparse
+import json
+import random
+import subprocess
+import sys
+from pathlib import Path
+
+import cv2
+import numpy as np
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
+import torchvision.models as models
+
+IMG_SIZE = 224  # must match main.py's MODEL_SIZE
+IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+CALIB_N = 200
+
+# ── Frame stacking (temporal memory) ───────────────────────────────────────
+# The model sees the current frame plus FRAME_STACK_N - 1 frames from its
+# recent past, concatenated as extra input channels, so it can tell "I'm
+# already correcting left" apart from "I've always been going straight" -
+# info a single memoryless frame can't carry. Consecutive camera captures
+# (~10ms apart at 100fps) look nearly identical, so we don't stack raw
+# consecutive frames - we pick frames roughly FRAME_STACK_GAP_SECONDS apart
+# in wall-clock time. Both constants must match main.py's copies exactly:
+# main.py builds the same kind of stack live, from a rolling buffer, and the
+# HEF's input shape (3 * FRAME_STACK_N channels) is baked in at compile time.
+FRAME_STACK_N = 3
+FRAME_STACK_GAP_SECONDS = 0.1
+
+# ── Train/val split ─────────────────────────────────────────────────────
+# At high recording fps, frames a few milliseconds apart are near-duplicates
+# (same image, same label). A plain per-frame random split would scatter
+# those near-duplicates across both train and val, so val would partly be
+# "grading" the model on frames it already effectively trained on -
+# inflating val accuracy without reflecting real generalization. Splitting
+# by contiguous time blocks instead keeps every near-duplicate cluster on
+# one side of the split.
+SPLIT_BLOCK_SECONDS = 3.0
+
+ENGINE_DIR = Path(__file__).parent
+ROOT_DIR = ENGINE_DIR.parent
+MODELS_DIR = ROOT_DIR / "models"
+
+
+# ── Preprocessing - must match main.py's preprocess() exactly ─────────────
+
+def load_and_preprocess(path, flip=False, brightness=1.0, cache=None):
+    """
+    data_recorder.py on the Pi saves frames straight from the camera's
+    capture_array() with no channel conversion; that array is BGR-ordered
+    in memory (picamera2's "RGB888" format is actually BGR - a naming
+    quirk confirmed against its source). cv2.imwrite treats input as BGR
+    and writes a normal, correctly-colored JPEG. So cv2.imread here gives
+    back that same BGR order - flip it to RGB exactly like main.py flips
+    its own raw capture array, so both sides land on the same channel
+    order before resize/normalize.
+
+    cache (optional): dict of {str(path): decoded+resized RGB uint8 array},
+    pre-populated by _preload_frames_to_ram(). When given and it already
+    has this path, skips disk I/O and JPEG decode entirely - flip/
+    brightness/normalize (cheap, per-sample augmentation) still run fresh
+    below since those vary per __getitem__ call and can't be cached.
+    Resize is moved ahead of flip/brightness here (vs. imread->flip->
+    brightness->resize before) so the cached array is already
+    augmentation-free; this doesn't change the flip=False, brightness=1.0
+    path (still imread->RGB->resize->normalize) that main.py must match.
+    """
+    key = str(path)
+    if cache is not None and key in cache:
+        img_rgb = cache[key]
+    else:
+        img_bgr = cv2.imread(key)
+        if img_bgr is None:
+            raise FileNotFoundError(f"Could not read image: {path}")
+        img_rgb = img_bgr[:, :, ::-1]
+        img_rgb = cv2.resize(img_rgb, (IMG_SIZE, IMG_SIZE), interpolation=cv2.INTER_LINEAR)
+        if cache is not None:
+            cache[key] = img_rgb
+    if flip:
+        img_rgb = img_rgb[:, ::-1, :]
+    if brightness != 1.0:
+        img_rgb = np.clip(img_rgb.astype(np.float32) * brightness, 0, 255).astype(np.uint8)
+    img = img_rgb.astype(np.float32) / 255.0
+    img = (img - IMAGENET_MEAN) / IMAGENET_STD
+    return img  # HWC float32, RGB, normalized
+
+
+# ── Dataset format detection ─────────────────────────────────────────────
+# data_recorder.py can record two formats (its --legacy flag): "classic"
+# (image_path + steering_angle only) or the current default, timestamped
+# (adds a "timestamp" field per frame, needed for frame-stacked temporal
+# input - see FRAME_STACK_N above). Detect which one a given dataset is so
+# training/export/inference can all agree on it without a separate config
+# flag to keep in sync - main.py does the equivalent detection at inference
+# time by reading the compiled HEF's own input channel count.
+
+def _detect_format(records):
+    """Returns True if this is a timestamped (frame-stackable) dataset,
+    False if it's classic (single-frame, no timestamps)."""
+    has_ts = [("timestamp" in r) for r in records]
+    if all(has_ts):
+        return True
+    if not any(has_ts):
+        return False
+    raise ValueError(
+        "This dataset mixes records with and without a 'timestamp' field - "
+        "can't tell whether it's classic (single-frame) or timestamped "
+        "(frame-stacked). Don't combine recordings made with and without "
+        "data_recorder.py's --legacy flag in the same driving_log.json."
+    )
+
+
+# ── Frame-stack assembly - shared by SteeringDataset and
+# save_calibration_data, so the temporal lookback logic can't drift between
+# the two ────────────────────────────────────────────────────────────────
+
+def _history_indices(records_sorted, idx, n=FRAME_STACK_N, gap=FRAME_STACK_GAP_SECONDS):
+    """
+    Returns n indices into records_sorted (time-ordered): [idx, idx ~gap
+    seconds earlier, idx ~2*gap seconds earlier, ...]. Walks backward frame
+    by frame accumulating real elapsed time rather than assuming a fixed
+    recording fps. If history runs out, or two adjacent recorded frames are
+    implausibly far apart in time (a pause or a new recording session
+    appended to the same driving_log.json - not actually one continuous
+    drive), stops there and pads by repeating the last valid frame found -
+    same fallback main.py uses live when it hasn't captured enough history
+    yet (e.g. right after startup).
+
+    n=1 (classic, single-frame datasets) short-circuits before touching
+    "timestamp" at all - classic records don't have that field.
+    """
+    if n == 1:
+        return [idx]
+    cur_ts = records_sorted[idx]["timestamp"]
+    result = [idx]
+    for k in range(1, n):
+        target_ts = cur_ts - k * gap
+        found = result[-1]
+        jj = result[-1]
+        while jj > 0:
+            step = records_sorted[jj]["timestamp"] - records_sorted[jj - 1]["timestamp"]
+            if step > gap * 5:  # pause / session boundary
+                break
+            jj -= 1
+            if records_sorted[jj]["timestamp"] <= target_ts:
+                found = jj
+                break
+        result.append(found)
+    return result
+
+
+def _chunk_indices(records_sorted, block_seconds=SPLIT_BLOCK_SECONDS):
+    """
+    Groups time-ordered record indices into contiguous chunks spanning
+    roughly block_seconds each (also cut at session boundaries, so a chunk
+    never silently straddles a pause/new-recording gap). Used to split
+    train/val by whole chunks instead of individual frames - see
+    SPLIT_BLOCK_SECONDS above for why.
+    """
+    chunks = []
+    current = []
+    chunk_start_ts = None
+    for i, r in enumerate(records_sorted):
+        ts = r["timestamp"]
+        if current and (ts - records_sorted[current[-1]]["timestamp"] > FRAME_STACK_GAP_SECONDS * 5
+                         or ts - chunk_start_ts >= block_seconds):
+            chunks.append(current)
+            current = []
+            chunk_start_ts = None
+        if chunk_start_ts is None:
+            chunk_start_ts = ts
+        current.append(i)
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+CLASSIC_SPLIT_BLOCK_FRAMES = 90  # classic-format datasets have no timestamps,
+                                  # so unlike _chunk_indices above, near-
+                                  # duplicate frames are grouped into
+                                  # train/val blocks by a fixed frame count
+                                  # (assuming driving_log.json stays in
+                                  # capture order) instead of wall-clock time.
+
+
+def _chunk_indices_by_count(records_sorted, block_frames=CLASSIC_SPLIT_BLOCK_FRAMES):
+    return [list(range(i, min(i + block_frames, len(records_sorted))))
+            for i in range(0, len(records_sorted), block_frames)]
+
+
+def _load_stack(records_sorted, idx, data_root, flip=False, brightness=1.0, n=FRAME_STACK_N, cache=None):
+    indices = _history_indices(records_sorted, idx, n=n)
+    frames = [
+        load_and_preprocess(data_root / records_sorted[i]["image_path"], flip=flip, brightness=brightness, cache=cache)
+        for i in indices
+    ]
+    return np.concatenate(frames, axis=-1)  # H, W, 3 * n
+
+
+# ── RAM frame cache (--a100 only) ──────────────────────────────────────
+# Frame-stacking means each image is read again as "history" by several
+# nearby samples, and WeightedRandomSampler re-reads rare-angle frames many
+# times per epoch on top of that - on a 151k-image dataset this makes
+# training disk-I/O-bound rather than GPU-bound (observed: A100 sitting at
+# 0-4% util while CPU wasn't even saturated). Decoding every unique frame
+# once into RAM up front removes disk I/O from the hot loop entirely.
+# Threaded (not multiprocessed) because cv2.imread/resize are C++ calls
+# that release the GIL, so threads still get real parallelism here; and
+# because this dict is built in the main process *before* DataLoader
+# workers fork, so on Linux (RunPod) copy-on-write means all workers share
+# the one in-memory copy instead of duplicating it per worker.
+def _preload_frames_to_ram(records, data_root, push, max_workers=16):
+    from concurrent.futures import ThreadPoolExecutor
+
+    paths = sorted({r["image_path"] for r in records})
+    push({"type": "log", "level": "info",
+          "text": f"Preloading {len(paths)} unique frames into RAM (--a100)..."})
+
+    def _decode(rel_path):
+        full = str(data_root / rel_path)
+        img_bgr = cv2.imread(full)
+        if img_bgr is None:
+            raise FileNotFoundError(f"Could not read image: {full}")
+        img_rgb = img_bgr[:, :, ::-1]
+        img_rgb = cv2.resize(img_rgb, (IMG_SIZE, IMG_SIZE), interpolation=cv2.INTER_LINEAR)
+        return full, np.ascontiguousarray(img_rgb)
+
+    cache = {}
+    done = 0
+    log_step = max(1, len(paths) // 20)
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        for full, img in ex.map(_decode, paths):
+            cache[full] = img
+            done += 1
+            if done % log_step == 0 or done == len(paths):
+                push({"type": "log", "level": "info", "text": f"  preloaded {done}/{len(paths)} frames"})
+
+    mb = sum(a.nbytes for a in cache.values()) / (1024 * 1024)
+    push({"type": "log", "level": "success",
+          "text": f"Preload done: {len(cache)} frames cached in RAM (~{mb/1024:.1f} GB)."})
+    return cache
+
+
+# ── Dataset ─────────────────────────────────────────────────────────────
+
+class SteeringDataset(Dataset):
+    """
+    records_sorted must be the FULL time-ordered dataset (not just this
+    split) - a sample near the start of the val split still needs to look
+    back into frames that may only exist in records_sorted, regardless of
+    which split they'd individually belong to. sample_indices selects which
+    of those records are actually this split's targets.
+    """
+
+    def __init__(self, records_sorted, sample_indices, data_root, augment=False, frame_stack_n=FRAME_STACK_N,
+                 cache=None):
+        self.records_sorted = records_sorted
+        self.sample_indices = sample_indices
+        self.data_root = Path(data_root)
+        self.augment = augment
+        self.frame_stack_n = frame_stack_n
+        self.cache = cache
+
+    def __len__(self):
+        return len(self.sample_indices)
+
+    def __getitem__(self, i):
+        idx = self.sample_indices[i]
+        rec = self.records_sorted[idx]
+        angle = float(rec["steering_angle"])
+
+        flip = self.augment and random.random() < 0.5
+        brightness = random.uniform(0.7, 1.3) if self.augment else 1.0
+        if flip:
+            angle = -angle
+
+        stack = _load_stack(self.records_sorted, idx, self.data_root, flip=flip, brightness=brightness,
+                             n=self.frame_stack_n, cache=self.cache)
+        tensor = torch.from_numpy(stack.transpose(2, 0, 1).copy())  # HWC -> CHW
+        return tensor, torch.tensor(angle, dtype=torch.float32)
+
+
+# ── Class-imbalance handling ────────────────────────────────────────────
+# Real driving logs are dominated by near-zero steering (most of a drive is
+# straight road) - e.g. one recorded set here is 74% exactly angle==0.0 and
+# only ~2% sharp turns (|angle|>0.6). Plain MSE weights every frame equally,
+# so the loss is minimized almost entirely by getting the abundant straight
+# frames right; the rare turn frames barely move the gradient and the model
+# converges to predicting near-zero for everything. Fix: oversample rare
+# steering magnitudes during training so each bucket contributes roughly
+# equally to what the model sees per epoch. Only applied to the train split -
+# val keeps the true distribution so val MSE stays a meaningful, comparable
+# metric across runs.
+_BALANCE_BIN_EDGES = [0.0, 0.001, 0.1, 0.3, 0.6, 1.0 + 1e-6]
+
+
+def _balanced_sample_weights(records_sorted, sample_indices):
+    angles = np.abs([records_sorted[i]["steering_angle"] for i in sample_indices])
+    bin_idx = np.digitize(angles, _BALANCE_BIN_EDGES[1:-1])
+    counts = np.bincount(bin_idx, minlength=len(_BALANCE_BIN_EDGES) - 1)
+    weights = 1.0 / counts[bin_idx]
+    return torch.as_tensor(weights, dtype=torch.double)
+
+
+# ── Model - proven to compile cleanly with the Hailo DFC and match what
+# main.py expects (single input, single float output) ─────────────────
+
+def build_model(frame_stack_n=FRAME_STACK_N):
+    m = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
+
+    in_ch = 3 * frame_stack_n
+    if in_ch != m.conv1.in_channels:
+        # Widen the first conv to accept the stacked input. Tile the
+        # pretrained 3-channel filters across the extra copies and divide by
+        # frame_stack_n, so a stack of similar-looking frames produces a
+        # first-conv output at roughly the scale the pretrained BatchNorm
+        # right after it was calibrated for - otherwise each extra copy adds
+        # fully to the sum and the activation statistics start out badly off
+        # from what the rest of the pretrained network expects. Classic
+        # (frame_stack_n=1) datasets skip this entirely - in_ch is already 3.
+        old_conv1 = m.conv1
+        new_conv1 = nn.Conv2d(in_ch, old_conv1.out_channels, kernel_size=old_conv1.kernel_size,
+                               stride=old_conv1.stride, padding=old_conv1.padding, bias=False)
+        with torch.no_grad():
+            new_conv1.weight.copy_(old_conv1.weight.repeat(1, frame_stack_n, 1, 1) / frame_stack_n)
+        m.conv1 = new_conv1
+
+    m.fc = nn.Sequential(
+        nn.Linear(512, 64),
+        nn.ReLU(inplace=True),
+        nn.Dropout(0.3),
+        nn.Linear(64, 1),
+    )
+    return m
+
+
+# ── Train / eval ────────────────────────────────────────────────────────
+
+def _train_epoch(model, loader, optimizer, device, push, epoch, epochs, use_amp=False, non_blocking=False):
+    model.train()
+    total, samples = 0.0, 0
+    n = len(loader)
+    log_step = max(1, n // 10)
+    for i, (imgs, angles) in enumerate(loader):
+        imgs, angles = imgs.to(device, non_blocking=non_blocking), angles.to(device, non_blocking=non_blocking)
+        optimizer.zero_grad()
+        if use_amp:
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                loss = nn.functional.mse_loss(model(imgs).squeeze(1), angles)
+        else:
+            loss = nn.functional.mse_loss(model(imgs).squeeze(1), angles)
+        loss.backward()
+        optimizer.step()
+        total += loss.item() * len(imgs)
+        samples += len(imgs)
+        if (i + 1) % log_step == 0:
+            push({"type": "log", "level": "info",
+                  "text": f"  epoch {epoch}/{epochs}  batch {i+1}/{n}  loss={total/samples:.5f}"})
+    return total / samples
+
+
+@torch.no_grad()
+def _eval_epoch(model, loader, device, use_amp=False, non_blocking=False):
+    model.eval()
+    total = 0.0
+    for imgs, angles in loader:
+        imgs, angles = imgs.to(device, non_blocking=non_blocking), angles.to(device, non_blocking=non_blocking)
+        if use_amp:
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                total += nn.functional.mse_loss(model(imgs).squeeze(1), angles).item() * len(imgs)
+        else:
+            total += nn.functional.mse_loss(model(imgs).squeeze(1), angles).item() * len(imgs)
+    return total / len(loader.dataset)
+
+
+# ── ONNX export ─────────────────────────────────────────────────────────
+
+def export_onnx(model, device, path, frame_stack_n=FRAME_STACK_N):
+    """
+    dynamo=False forces the old TorchScript-based exporter, which honors
+    opset_version directly. Without it, newer PyTorch (2.5+) defaults to
+    the torch.export-based "dynamo" exporter, which only emits opset 18
+    and then tries to auto-downgrade to our requested opset 13 - that
+    downgrade path has a known bug in onnx's version converter that fails
+    on ResNet's Resize/pooling ops ("No initializer or constant input to
+    node found"). The Hailo DFC (3.34.0) needs opset 13, so we go through
+    the old exporter instead of fighting the downgrade converter.
+    """
+    model.eval()
+    dummy = torch.zeros(1, 3 * frame_stack_n, IMG_SIZE, IMG_SIZE, device=device)
+    torch.onnx.export(
+        model, dummy, str(path),
+        export_params=True, opset_version=13, do_constant_folding=True,
+        input_names=["input"], output_names=["steering"],
+        dynamic_axes={"input": {0: "batch"}, "steering": {0: "batch"}},
+        dynamo=False,
+    )
+
+
+# ── Calibration data for the Hailo INT8 quantizer - reuses the exact same
+# preprocessing (and frame-stack assembly) as training, saved directly in
+# NHWC (what the DFC wants), so compile.sh doesn't need a separate
+# transpose step ───────────────────────────────────────────────────────
+
+def save_calibration_data(records, data_root, out_path, n=CALIB_N, frame_stack_n=FRAME_STACK_N):
+    if frame_stack_n > 1:
+        records_sorted = sorted(records, key=lambda r: r["timestamp"])
+    else:
+        records_sorted = records  # no timestamps to sort by - order doesn't matter, single-frame
+    sample_idx = random.sample(range(len(records_sorted)), min(n, len(records_sorted)))
+    arrays = [_load_stack(records_sorted, i, Path(data_root), n=frame_stack_n) for i in sample_idx]
+    calib = np.stack(arrays).astype(np.float32)  # (N, H, W, 3 * frame_stack_n)
+    np.save(str(out_path), calib)
+
+
+# ── Docker HEF compilation ──────────────────────────────────────────────
+
+DFC_WHEEL_PATH = ENGINE_DIR / "compile" / "resources" / "hailo_dataflow_compiler-3.34.0-py3-none-linux_x86_64.whl"
+
+
+def check_compile_prereqs(push):
+    """Checked BEFORE training starts, not after - a missing wheel or a
+    stopped Docker Desktop should fail in a second, not after a training
+    run that can take hours."""
+    ok = True
+    r = subprocess.run(["docker", "info"], capture_output=True)
+    if r.returncode != 0:
+        push({"type": "log", "level": "error", "text": "Docker is not running - start Docker Desktop first."})
+        ok = False
+    if not DFC_WHEEL_PATH.exists():
+        push({"type": "log", "level": "error",
+              "text": f"Hailo DFC wheel not found at {DFC_WHEEL_PATH}. "
+                      f"Download it from the Hailo Developer Zone and place it there (see README.md)."})
+        ok = False
+    return ok
+
+
+def _ensure_lf_line_endings(path):
+    """compile.sh runs as bash inside the Linux container - CRLF line
+    endings (which a Windows checkout can introduce despite
+    .gitattributes, e.g. if the file was checked out before that rule
+    existed) break it in confusing ways (stray \\r breaks `set -e`, every
+    argument, etc.). Fix it in place here rather than depending on git/
+    checkout behavior on whatever machine this runs on."""
+    raw = path.read_bytes()
+    fixed = raw.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    if fixed != raw:
+        path.write_bytes(fixed)
+
+
+def compile_hef(model_name, push):
+    _ensure_lf_line_endings(ENGINE_DIR / "compile" / "compile.sh")
+
+    push({"type": "log", "level": "info", "text": "Building hailo-dfc image (cached after first run)..."})
+    build = subprocess.Popen(
+        ["docker", "build", "--progress=plain", "-t", "hailo-dfc",
+         "-f", str(ENGINE_DIR / "compile" / "Dockerfile"), str(ENGINE_DIR)],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
+    )
+    for line in build.stdout:
+        if line.rstrip():
+            push({"type": "log", "level": "docker", "text": line.rstrip()})
+    build.wait()
+    if build.returncode != 0:
+        push({"type": "log", "level": "error", "text": "Docker build failed."})
+        return False
+
+    push({"type": "log", "level": "info", "text": f"Compiling {model_name} to HEF..."})
+    run = subprocess.Popen(
+        ["docker", "run", "--rm", "-v", f"{ROOT_DIR}:/workspace",
+         "hailo-dfc", "bash", "/workspace/engine/compile/compile.sh", model_name],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
+    )
+    for line in run.stdout:
+        if line.rstrip():
+            push({"type": "log", "level": "docker", "text": line.rstrip()})
+    run.wait()
+    if run.returncode != 0:
+        push({"type": "log", "level": "error", "text": "DFC compilation failed."})
+        return False
+
+    hef_path = MODELS_DIR / f"{model_name}.hef"
+    if not hef_path.exists():
+        # compile.sh exiting 0 doesn't guarantee it worked - `set -e` only
+        # stops the script if the shell actually parses it correctly (e.g.
+        # CRLF line endings from a Windows checkout can silently break
+        # that, letting every step after a failure keep running and still
+        # print "SUCCESS"). Trust the actual file, not the exit code.
+        push({"type": "log", "level": "error",
+              "text": f"compile.sh exited 0 but {hef_path} was never created - "
+                      f"check the docker log above for the real error (often a CRLF "
+                      f"line-ending issue in compile.sh on Windows checkouts)."})
+        return False
+
+    push({"type": "log", "level": "success", "text": f"HEF ready: models/{model_name}.hef"})
+    return True
+
+
+# ── Smoke test - exercises the full export+compile pipeline (ONNX export,
+# Docker, Hailo DFC) in seconds instead of hours, with an untrained model.
+# Doesn't touch or overwrite any of your real named models. ────────────
+
+SMOKE_TEST_NAME = "smoketest"
+
+
+def run_smoke_test(config, push=None):
+    if push is None:
+        push = lambda e: print(e.get("text", e))
+
+    json_path = Path(config["json_path"])
+    if json_path.is_dir():
+        json_path = json_path / "driving_log.json"
+    if not json_path.exists():
+        push({"type": "log", "level": "error", "text": f"Not found: {json_path}"})
+        push({"type": "done"})
+        return
+
+    if not check_compile_prereqs(push):
+        push({"type": "done"})
+        return
+
+    with open(json_path) as f:
+        records = json.load(f)
+    data_root = json_path.parent
+    records = [r for r in records if (data_root / r["image_path"]).exists()]
+    if not records:
+        push({"type": "log", "level": "error", "text": "No valid images found in the dataset - need at least 1."})
+        push({"type": "done"})
+        return
+    is_stacked = _detect_format(records)
+    frame_stack_n = FRAME_STACK_N if is_stacked else 1
+    push({"type": "log", "level": "info",
+          "text": f"Dataset format: {'timestamped, ' + str(FRAME_STACK_N) + '-frame stack' if is_stacked else 'classic, single-frame'}."})
+    push({"type": "log", "level": "info", "text": f"Using {min(5, len(records))} of {len(records)} images for calibration (untrained model - this only tests the pipeline, not accuracy)."})
+
+    MODELS_DIR.mkdir(exist_ok=True)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = build_model(frame_stack_n).to(device)  # random/pretrained-backbone weights, 0 epochs of fine-tuning
+    model.eval()
+
+    ckpt_path = MODELS_DIR / f"{SMOKE_TEST_NAME}.pth"
+    torch.save(model.state_dict(), ckpt_path)
+
+    onnx_path = MODELS_DIR / f"{SMOKE_TEST_NAME}.onnx"
+    push({"type": "log", "level": "info", "text": "Exporting ONNX..."})
+    export_onnx(model, device, onnx_path, frame_stack_n)
+    push({"type": "log", "level": "success", "text": "ONNX export OK."})
+
+    calib_path = MODELS_DIR / f"{SMOKE_TEST_NAME}_calib_data_nhwc.npy"
+    save_calibration_data(records, data_root, calib_path, n=5, frame_stack_n=frame_stack_n)
+
+    ok = compile_hef(SMOKE_TEST_NAME, push)
+    if ok:
+        onnx_path.unlink(missing_ok=True)
+        for tmp in [MODELS_DIR / f"{SMOKE_TEST_NAME}.har", MODELS_DIR / f"{SMOKE_TEST_NAME}_optimized.har"]:
+            tmp.unlink(missing_ok=True)
+        push({"type": "log", "level": "success",
+              "text": f"Pipeline OK end-to-end - models/{SMOKE_TEST_NAME}.hef compiled successfully. "
+                      f"(It's an untrained model - don't put it on the Pi, this was just to test the pipeline.)"})
+        push({"type": "file", "name": f"{SMOKE_TEST_NAME}.hef"})
+    push({"type": "done"})
+
+
+# ── Main entry point ────────────────────────────────────────────────────
+
+def run(config, push=None, should_stop=None):
+    """
+    config keys:
+      json_path  : path to driving_log.json (frames resolved relative to its folder)
+      model_name : output name (models/<name>.pth, .onnx, .hef)
+      epochs     : int (default 20)
+      batch_size : int (default 32)
+    """
+    if push is None:
+        push = lambda e: print(e.get("text", e))
+
+    json_path = Path(config["json_path"])
+    if json_path.is_dir():
+        json_path = json_path / "driving_log.json"
+    model_name = config.get("model_name", "model").strip() or "model"
+    epochs = int(config.get("epochs", 20))
+    # 256, not the 512 the A100 could brute-force: your validated recipe was
+    # batch 32 (~2233 weight updates/epoch). Every doubling of batch size
+    # halves how many updates the optimizer gets per epoch at a fixed LR, so
+    # this stays as small as the A100 can comfortably run at near-full
+    # utilization (RAM cache + torch.compile below already fixed the actual
+    # bottleneck, disk I/O - batch size no longer needs to do that job too)
+    # rather than maximizing GPU throughput at the cost of drifting further
+    # from what's known to converge well.
+    batch_size = int(config.get("batch_size") or (256 if config.get("a100") else 32))
+    MODELS_DIR.mkdir(exist_ok=True)
+
+    if not json_path.exists():
+        push({"type": "log", "level": "error", "text": f"Not found: {json_path}"})
+        return
+
+    if not config.get("pth_only") and not check_compile_prereqs(push):
+        push({"type": "log", "level": "error",
+              "text": "Fix the above before starting - training can take hours and "
+                      "the HEF compile step needs these to be in place."})
+        return
+
+    random.seed(42)
+    torch.manual_seed(42)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    use_amp = config.get("a100") and device.type == "cuda"
+    if use_amp:
+        torch.backends.cudnn.benchmark = True
+    push({"type": "log", "level": "info", "text": f"Device: {device}"})
+
+    with open(json_path) as f:
+        records = json.load(f)
+    data_root = json_path.parent
+    records = [r for r in records if (data_root / r["image_path"]).exists()]
+    push({"type": "log", "level": "info", "text": f"Valid samples: {len(records)}"})
+    if len(records) < 10:
+        push({"type": "log", "level": "error", "text": "Not enough valid samples to train."})
+        return
+
+    is_stacked = _detect_format(records)
+    frame_stack_n = FRAME_STACK_N if is_stacked else 1
+    push({"type": "log", "level": "info",
+          "text": f"Dataset format: {'timestamped, ' + str(FRAME_STACK_N) + '-frame stack' if is_stacked else 'classic, single-frame'}."})
+
+    if is_stacked:
+        # records_sorted stays intact (full, time-ordered) so any sample can
+        # look back for stack history regardless of which split it landed in
+        # - only whole time-blocks get shuffled and split into train/val
+        # (see _chunk_indices - keeps near-duplicate frames on the same side).
+        records_sorted = sorted(records, key=lambda r: r["timestamp"])
+        chunks = _chunk_indices(records_sorted)
+    else:
+        # No timestamps to sort/group by - driving_log.json is already in
+        # capture order, so fixed-size index blocks stand in for time blocks.
+        records_sorted = records
+        chunks = _chunk_indices_by_count(records_sorted)
+    random.shuffle(chunks)
+    total = len(records_sorted)
+    train_target = int(0.8 * total)
+    val_target = int(0.1 * total)
+    train_idx, val_idx = [], []
+    for chunk in chunks:
+        if len(train_idx) < train_target:
+            train_idx.extend(chunk)
+        elif len(val_idx) < val_target:
+            val_idx.extend(chunk)
+        # else: leftover chunks held out, unused - same as before
+    push({"type": "split", "train": len(train_idx), "val": len(val_idx), "total": len(records_sorted)})
+
+    cache = _preload_frames_to_ram(records, data_root, push) if config.get("a100") else None
+
+    train_weights = _balanced_sample_weights(records_sorted, train_idx)
+    train_sampler = WeightedRandomSampler(train_weights, num_samples=len(train_idx), replacement=True)
+    num_workers = 12 if config.get("a100") else 0
+    pin_memory = use_amp
+    extra_kwargs = {"prefetch_factor": 4} if num_workers > 0 else {}
+    train_ld = DataLoader(SteeringDataset(records_sorted, train_idx, data_root, augment=True, frame_stack_n=frame_stack_n,
+                                           cache=cache),
+                           batch_size=batch_size, sampler=train_sampler, num_workers=num_workers,
+                           persistent_workers=num_workers > 0, pin_memory=pin_memory,
+                           # drop_last: only matters for a100 (batch_size=32's ~2233
+                           # batches/epoch already divide train_idx evenly enough not
+                           # to need it) - keeps every training batch the same shape,
+                           # so torch.compile doesn't have to also handle/recompile
+                           # for one odd-sized tail batch per epoch, and BatchNorm
+                           # never sees a tiny, noisier tail batch. Drops at most
+                           # batch_size-1 samples out of 71k+ - negligible.
+                           drop_last=bool(config.get("a100")), **extra_kwargs)
+    val_ld = DataLoader(SteeringDataset(records_sorted, val_idx, data_root, augment=False, frame_stack_n=frame_stack_n,
+                                         cache=cache),
+                         batch_size=batch_size, shuffle=False, num_workers=num_workers,
+                         persistent_workers=num_workers > 0, pin_memory=pin_memory, **extra_kwargs)
+
+    model = build_model(frame_stack_n).to(device)
+    train_model = model
+    if config.get("a100") and device.type == "cuda":
+        # Fuses/compiles the training graph for this fixed input shape - a
+        # meaningful speedup for a model this small, where kernel-launch
+        # overhead otherwise limits how much of the A100 actually gets used.
+        # `model` (uncompiled) stays the checkpoint/export target below, so
+        # this can't affect the saved .pth's state_dict keys or ONNX export.
+        try:
+            train_model = torch.compile(model)
+            push({"type": "log", "level": "info", "text": "torch.compile enabled for training."})
+        except Exception as e:
+            push({"type": "log", "level": "warning", "text": f"torch.compile unavailable, continuing without it: {e}"})
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-4)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+    best_val = float("inf")
+    ckpt_path = MODELS_DIR / f"{model_name}.pth"
+
+    for epoch in range(1, epochs + 1):
+        train_loss = _train_epoch(train_model, train_ld, optimizer, device, push, epoch, epochs,
+                                   use_amp=use_amp, non_blocking=pin_memory)
+        val_loss = _eval_epoch(train_model, val_ld, device, use_amp=use_amp, non_blocking=pin_memory)
+        scheduler.step()
+        is_best = val_loss < best_val
+        if is_best:
+            best_val = val_loss
+            torch.save(model.state_dict(), ckpt_path)
+        push({"type": "epoch", "epoch": epoch, "total": epochs,
+              "train": round(train_loss, 6), "val": round(val_loss, 6), "best": is_best})
+        if should_stop and should_stop():
+            push({"type": "log", "level": "warning", "text": f"Stopped at epoch {epoch}."})
+            break
+
+    push({"type": "log", "level": "success", "text": f"Best val MSE: {best_val:.6f}"})
+    model.load_state_dict(torch.load(ckpt_path, map_location=device))
+    model.eval()
+    push({"type": "file", "name": f"{model_name}.pth"})
+
+    if config.get("pth_only"):
+        push({"type": "log", "level": "success",
+              "text": f"PTH salvat: models/{model_name}.pth — descarca-l si compileaza local."})
+        push({"type": "done"})
+        return
+
+    onnx_path = MODELS_DIR / f"{model_name}.onnx"
+    push({"type": "log", "level": "info", "text": "Exporting ONNX..."})
+    export_onnx(model, device, onnx_path, frame_stack_n)
+
+    calib_path = MODELS_DIR / f"{model_name}_calib_data_nhwc.npy"
+    push({"type": "log", "level": "info", "text": "Saving calibration data..."})
+    save_calibration_data(records, data_root, calib_path, frame_stack_n=frame_stack_n)
+
+    ok = compile_hef(model_name, push)
+    if ok:
+        onnx_path.unlink(missing_ok=True)
+        for tmp in [MODELS_DIR / f"{model_name}.har", MODELS_DIR / f"{model_name}_optimized.har"]:
+            tmp.unlink(missing_ok=True)
+        push({"type": "file", "name": f"{model_name}.hef"})
+    else:
+        push({"type": "log", "level": "warning",
+              "text": f"Training succeeded (models/{model_name}.pth, .onnx, {calib_path.name} all saved) - "
+                      f"fix the compile issue above, then use 'Retry compile' with the same model name "
+                      f"to finish without retraining."})
+    push({"type": "done"})
+
+
+def retry_compile(config, push=None):
+    """Recompiles an already-trained model to HEF, reusing the .onnx and
+    calibration data saved by a previous run() call - skips training
+    entirely. Use this after fixing a Docker/DFC problem so a failed
+    compile doesn't mean redoing hours of training."""
+    if push is None:
+        push = lambda e: print(e.get("text", e))
+
+    model_name = config.get("model_name", "model").strip() or "model"
+    json_path_str = (config.get("json_path") or "").strip()
+    onnx_path = MODELS_DIR / f"{model_name}.onnx"
+    calib_path = MODELS_DIR / f"{model_name}_calib_data_nhwc.npy"
+    ckpt_path = MODELS_DIR / f"{model_name}.pth"
+
+    # frame_stack_n isn't stored anywhere separately - the checkpoint's own
+    # conv1 weight shape is the authoritative record of what it was actually
+    # trained/exported with (classic vs timestamped dataset), so read it back
+    # from there instead of re-deriving it and risking it drifting out of
+    # sync with what's actually in the .pth.
+    frame_stack_n = None
+    if ckpt_path.exists():
+        frame_stack_n = torch.load(ckpt_path, map_location="cpu")["conv1.weight"].shape[1] // 3
+
+    if not onnx_path.exists():
+        if not ckpt_path.exists():
+            push({"type": "log", "level": "error",
+                  "text": f"Neither {onnx_path} nor {ckpt_path} exist - nothing to compile, run training first."})
+            push({"type": "done"})
+            return
+        push({"type": "log", "level": "warning", "text": f"{onnx_path} missing - re-exporting from {ckpt_path.name}..."})
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model = build_model(frame_stack_n).to(device)
+        model.load_state_dict(torch.load(ckpt_path, map_location=device))
+        model.eval()
+        export_onnx(model, device, onnx_path, frame_stack_n)
+        push({"type": "log", "level": "success", "text": "Re-exported ONNX."})
+
+    if not calib_path.exists():
+        if not json_path_str:
+            push({"type": "log", "level": "error",
+                  "text": f"{calib_path} missing and no dataset path given - set the dataset "
+                          f"folder field and retry to regenerate calibration data."})
+            push({"type": "done"})
+            return
+        json_path = Path(json_path_str)
+        if json_path.is_dir():
+            json_path = json_path / "driving_log.json"
+        if not json_path.exists():
+            push({"type": "log", "level": "error", "text": f"Not found: {json_path}"})
+            push({"type": "done"})
+            return
+        push({"type": "log", "level": "warning", "text": "Calibration data missing - regenerating..."})
+        with open(json_path) as f:
+            records = json.load(f)
+        data_root = json_path.parent
+        records = [r for r in records if (data_root / r["image_path"]).exists()]
+        if frame_stack_n is None:  # no checkpoint to read it from - fall back to the dataset itself
+            frame_stack_n = FRAME_STACK_N if _detect_format(records) else 1
+        save_calibration_data(records, data_root, calib_path, frame_stack_n=frame_stack_n)
+        push({"type": "log", "level": "success", "text": "Regenerated calibration data."})
+
+    if not check_compile_prereqs(push):
+        push({"type": "done"})
+        return
+
+    ok = compile_hef(model_name, push)
+    if ok:
+        onnx_path.unlink(missing_ok=True)
+        for tmp in [MODELS_DIR / f"{model_name}.har", MODELS_DIR / f"{model_name}_optimized.har"]:
+            tmp.unlink(missing_ok=True)
+        push({"type": "file", "name": f"{model_name}.hef"})
+    push({"type": "done"})
+
+
+def compile_from_pth(config, push=None):
+    """Incarca un .pth extern, il exporta ONNX si compileaza HEF.
+    config keys: pth_path, model_name, calib_npy (optional)."""
+    if push is None:
+        push = lambda e: print(e.get("text", e))
+
+    pth_path  = Path((config.get("pth_path") or "").strip())
+    model_name = (config.get("model_name") or "model").strip() or "model"
+    MODELS_DIR.mkdir(exist_ok=True)
+    onnx_path  = MODELS_DIR / f"{model_name}.onnx"
+    calib_path = MODELS_DIR / f"{model_name}_calib_data_nhwc.npy"
+
+    if not pth_path.exists():
+        push({"type": "log", "level": "error", "text": f"Fisierul PTH nu exista: {pth_path}"})
+        push({"type": "done"})
+        return
+
+    push({"type": "log", "level": "info", "text": f"Incarcare checkpoint: {pth_path.name}"})
+    state = torch.load(str(pth_path), map_location="cpu")
+    # Detecteaza frame_stack_n din forma primului strat conv
+    frame_stack_n = state["conv1.weight"].shape[1] // 3
+    push({"type": "log", "level": "info", "text": f"frame_stack_n detectat: {frame_stack_n}"})
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = build_model(frame_stack_n).to(device)
+    model.load_state_dict(state)
+    model.eval()
+    push({"type": "log", "level": "info", "text": "Model incarcat. Export ONNX..."})
+    export_onnx(model, device, onnx_path, frame_stack_n)
+    push({"type": "log", "level": "success", "text": f"ONNX exportat: models/{model_name}.onnx"})
+
+    # Calibrare — genereaza date sintetice daca nu exista calib real
+    if not calib_path.exists():
+        calib_npy_str = (config.get("calib_npy") or "").strip()
+        if calib_npy_str and Path(calib_npy_str).exists():
+            import shutil
+            shutil.copy(calib_npy_str, calib_path)
+            push({"type": "log", "level": "info", "text": "Date calibrare copiate."})
+        else:
+            push({"type": "log", "level": "warning",
+                  "text": "Date calibrare lipsa - generez date sintetice (precizie quantizare mai slaba)."})
+            calib = np.random.randn(CALIB_N, IMG_SIZE, IMG_SIZE, 3 * frame_stack_n).astype(np.float32)
+            np.save(str(calib_path), calib)
+
+    if not check_compile_prereqs(push):
+        push({"type": "done"})
+        return
+
+    ok = compile_hef(model_name, push)
+    if ok:
+        onnx_path.unlink(missing_ok=True)
+        for tmp in [MODELS_DIR / f"{model_name}.har", MODELS_DIR / f"{model_name}_optimized.har"]:
+            tmp.unlink(missing_ok=True)
+        push({"type": "file", "name": f"{model_name}.hef"})
+    push({"type": "done"})
+
+
+if __name__ == "__main__":
+    p = argparse.ArgumentParser()
+    p.add_argument("--json", required=True, help="Path to driving_log.json")
+    p.add_argument("--name", default="model")
+    p.add_argument("--epochs", type=int, default=20)
+    p.add_argument("--batch-size", type=int, default=None)
+    p.add_argument("--pth-only", action="store_true", help="Stop after saving .pth, skip ONNX/HEF compile")
+    p.add_argument("--a100", action="store_true",
+                    help="Enable A100 optimizations: RAM frame cache, BF16 AMP, torch.compile, "
+                         "num_workers=12, batch 256, pin_memory, cudnn.benchmark, async H2D transfer")
+    args = p.parse_args()
+    run({"json_path": args.json, "model_name": args.name,
+         "epochs": args.epochs, "batch_size": args.batch_size,
+         "pth_only": args.pth_only, "a100": args.a100})

@@ -37,8 +37,9 @@ to the servo, no EMA smoothing, no deadzone) - pass --smooth-steering for
 EMA+deadzone. Display defaults to off (headless) - pass --display for a
 live cv2 preview window.
 
-Put exactly one *.hef file in this folder next to this script (same rule
-as model_runner.py's find_hef_path()).
+Models live in main/models/. Without --hef (the dashboard's model picker
+passes one), the run uses the one *.hef in main/models/ - exactly one must be
+there.
 
 Usage:
     python3 main.py --speed-mode cruise --target-kmh 10 --distance-m 500
@@ -105,6 +106,7 @@ from hailo_platform import (
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOG_FILE_PATH = os.path.join(BASE_DIR, "main.log")
 TICK_LOG_DIR = os.path.join(BASE_DIR, "logs")
+MODELS_DIR = os.path.join(BASE_DIR, "models")  # the .hef files to run (kept out of git)
 os.makedirs(TICK_LOG_DIR, exist_ok=True)
 
 logging.basicConfig(
@@ -176,17 +178,18 @@ SPEED_MODES = ("cruise", "controller", "none")
 
 def find_hef_path(explicit=None):
     """--hef PATH (picked in the dashboard) wins; without it, the one .hef
-    next to this script, as before."""
+    in main/models/."""
     if explicit:
         if not (explicit.endswith(".hef") and os.path.isfile(explicit)):
             raise RuntimeError(f"Modelul ales nu exista sau nu e un fisier .hef: {explicit}")
         return explicit
-    hefs = [f for f in os.listdir(BASE_DIR) if f.endswith(".hef")]
+    hefs = sorted(f for f in os.listdir(MODELS_DIR) if f.endswith(".hef")) if os.path.isdir(MODELS_DIR) else []
     if len(hefs) == 0:
-        raise RuntimeError(f"Niciun fisier .hef gasit in {BASE_DIR}. Pune exact un model acolo.")
+        raise RuntimeError(f"Niciun fisier .hef gasit in {MODELS_DIR}. Pune un model acolo sau alege-l cu --hef.")
     if len(hefs) > 1:
-        raise RuntimeError(f"Mai multe fisiere .hef gasite in {BASE_DIR}: {hefs}. Trebuie sa fie exact unul.")
-    return os.path.join(BASE_DIR, hefs[0])
+        raise RuntimeError(f"Mai multe fisiere .hef in {MODELS_DIR}: {hefs}. Alege unul cu --hef "
+                           f"(in dashboard: Alege alt model).")
+    return os.path.join(MODELS_DIR, hefs[0])
 
 
 def _format_pace(kmh):
@@ -388,7 +391,7 @@ def parse_args():
                      help="Deschide o fereastra cv2 de preview live")
     ap.add_argument("--hef", metavar="PATH", default=None,
                      help="Model .hef de folosit (cale absoluta, oriunde pe Pi). Implicit: "
-                          "singurul .hef din folderul main/")
+                          "singurul .hef din main/models/")
     args = ap.parse_args()
 
     if args.speed_mode == "cruise":

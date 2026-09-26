@@ -1,4 +1,4 @@
-# Models / compiled artifacts (main/main.py's .hef is supplied at deploy time)
+# Models / compiled artifacts (main/models/ holds the .hef files to run - copied in by hand, not in git)
 *.hef
 *.pth
 *.onnx

@@ -93,8 +93,9 @@ Compile-only mode, before it's a usable `.hef`.
 
 Output lands in `trainer/models/<name>.pth` (+ `.onnx` intermediate, `.hef`
 if compiled, `_calib_data_nhwc.npy`). Copy the `.hef` onto the Pi, into
-`main/` and/or `model_runner/` — exactly one `.hef` file must be present in
-whichever folder you're running from.
+`main/models/`. Pick which one to run in the dashboard's model picker (it
+opens in `main/models/`); a plain `main.py` run without `--hef` needs
+exactly one `.hef` there.
 
 ---
 

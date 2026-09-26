@@ -19,7 +19,7 @@ import time
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(BASE_DIR)
-MAIN_DIR = os.path.join(REPO_ROOT, "main")
+MAIN_MODELS_DIR = os.path.join(REPO_ROOT, "main", "models")
 
 sys.path.append(REPO_ROOT)
 from config.ipc_config import MAIN_CONTROL_SOCKET, MANUAL_DRIVE_CONTROL_SOCKET, RELAY_SOCKET  # noqa: E402
@@ -147,16 +147,17 @@ def get_esp32_status():
 
 
 def get_main_model_info():
-    """Mirrors main/main.py's find_hef_path() "exactly one .hef" rule, so
-    the web page can show/block Start before the script has even run."""
+    """Mirrors main/main.py's find_hef_path() "exactly one .hef in
+    main/models/" rule, so the web page can show/block Start before the
+    script has even run."""
     try:
-        hefs = [f for f in os.listdir(MAIN_DIR) if f.endswith(".hef")]
+        hefs = sorted(f for f in os.listdir(MAIN_MODELS_DIR) if f.endswith(".hef"))
     except OSError as e:
-        return {"ok": False, "error": f"Nu pot citi {MAIN_DIR}: {e}"}
+        return {"ok": False, "error": f"Nu pot citi {MAIN_MODELS_DIR}: {e}"}
     if len(hefs) == 0:
-        return {"ok": False, "error": f"Niciun fisier .hef in {MAIN_DIR}."}
+        return {"ok": False, "error": f"Niciun fisier .hef in {MAIN_MODELS_DIR}."}
     if len(hefs) > 1:
-        return {"ok": False, "error": f"Mai multe fisiere .hef in {MAIN_DIR}: {hefs}."}
+        return {"ok": False, "error": f"{len(hefs)} modele in main/models - alege unul."}
     return {"ok": True, "model_name": hefs[0]}
 
 

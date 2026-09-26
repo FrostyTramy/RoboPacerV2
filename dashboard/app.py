@@ -301,7 +301,7 @@ def run_page(script_id):
         return f"Script necunoscut: {script_id}", 404
     return render_template(script["template"], script=script, target_speed_max_kmh=TARGET_SPEED_MAX_KMH,
                             distance_min=DISTANCE_M_MIN, distance_max=DISTANCE_M_MAX,
-                            main_dir=os.path.join(REPO_ROOT, "main"))
+                            models_dir=system_stats.MAIN_MODELS_DIR)
 
 
 @app.route("/api/status")
@@ -387,7 +387,7 @@ def _main_args(data):
     if display is None:
         return None, ("invalid_display", 400)
 
-    # Optional model picked in the file browser; absent = main/'s own .hef.
+    # Optional model picked in the file browser; absent = the one .hef in main/models/.
     hef_path = data.get("hef_path")
     if hef_path is not None:
         hef_path = filebrowser.resolve_hef(hef_path)

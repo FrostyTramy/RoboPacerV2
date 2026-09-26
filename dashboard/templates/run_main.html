@@ -7,7 +7,7 @@
     <div class="status-line" id="model-source" style="margin-bottom: 0;"></div>
     <div class="model-actions">
       <button type="button" class="btn small secondary" id="model-browse">Alege alt model</button>
-      <button type="button" class="btn small secondary hidden" id="model-reset">Foloseste modelul din main</button>
+      <button type="button" class="btn small secondary hidden" id="model-reset">Foloseste modelul din models</button>
     </div>
   </div>
 
@@ -17,7 +17,7 @@
       <div class="fs-path" id="fs-path"></div>
       <div class="fs-shortcuts">
         <button type="button" class="btn small secondary" data-go="home">Acasa</button>
-        <button type="button" class="btn small secondary" data-go="main">Folderul main</button>
+        <button type="button" class="btn small secondary" data-go="models">Folderul models</button>
         <button type="button" class="btn small secondary" data-go="root">/ (radacina)</button>
       </div>
       <div class="fs-list" id="fs-list"></div>
@@ -84,8 +84,8 @@
     none: 'Doar steering-ul modelului - motorul ramane in neutru. [A] porneste, [B] opreste.',
   };
 
-  // --- Model: the .hef in main/ unless one is picked in the file browser ---
-  const MAIN_DIR = {{ main_dir | tojson }};
+  // --- Model: the one .hef in main/models/ unless one is picked in the file browser ---
+  const MODELS_DIR = {{ models_dir | tojson }};
   let defaultModel = null;   // /api/main/model_info result
   let chosenHef = null;      // absolute path picked by the user, or null
 
@@ -102,7 +102,7 @@
       modelBlocked = false;
     } else if (defaultModel && defaultModel.ok) {
       el.textContent = defaultModel.model_name;
-      src.textContent = 'din folderul main';
+      src.textContent = 'din main/models';
       modelBlocked = false;
     } else if (defaultModel) {
       el.innerHTML = `<span class="error-text">${escapeHtml(defaultModel.error)}</span>`;
@@ -122,7 +122,6 @@
   const fsModal = document.getElementById('fs-modal');
   const fsListEl = document.getElementById('fs-list');
   const fsErrEl = document.getElementById('fs-error');
-  let fsLastDir = null;
 
   function fsOpen(path) {
     fsErrEl.textContent = '';
@@ -131,7 +130,6 @@
         fsErrEl.textContent = d.error === 'permission_denied' ? 'Fara acces la folderul asta.' : 'Nu pot deschide folderul.';
         return;
       }
-      fsLastDir = d.path;
       document.getElementById('fs-path').textContent = d.path;
       fsListEl.innerHTML = '';
       const addItem = (text, meta, cls, onClick) => {
@@ -170,13 +168,14 @@
 
   document.getElementById('model-browse').addEventListener('click', () => {
     fsModal.classList.remove('hidden');
-    fsOpen(fsLastDir || (chosenHef ? dirName(chosenHef) : null));
+    // Opens in main/models (or the picked model's folder); ".." goes anywhere.
+    fsOpen(chosenHef ? dirName(chosenHef) : MODELS_DIR);
   });
   document.getElementById('fs-cancel').addEventListener('click', () => fsModal.classList.add('hidden'));
   fsModal.addEventListener('click', (e) => { if (e.target === fsModal) fsModal.classList.add('hidden'); });
   fsModal.querySelectorAll('[data-go]').forEach(btn => btn.addEventListener('click', () => {
     const go = btn.dataset.go;
-    fsOpen(go === 'main' ? MAIN_DIR : go === 'root' ? '/' : null);
+    fsOpen(go === 'models' ? MODELS_DIR : go === 'root' ? '/' : null);
   }));
 
   // --- Mode switch + km/h<->pace toggle --------------------------------

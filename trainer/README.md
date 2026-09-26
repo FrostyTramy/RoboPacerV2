@@ -3,10 +3,8 @@
 Runs on Windows (or any machine with a GPU/CPU + Docker Desktop) - trains
 the steering model on a dataset collected by `data_recorder/data_recorder.py`
 on the Pi, then compiles it to a `.hef` for the Hailo-8 via Docker.
-`model_runner/model_runner.py` (steering-only) or `main/main.py` (steering +
-cruise-control speed) on the Pi run the resulting `.hef` - both run the
-exact same inference/preprocessing code, just drop the `.hef` next to
-whichever one you're using.
+`main/main.py` on the Pi runs the resulting `.hef` - put it in
+`main/models/` and pick it in the dashboard.
 
 For setup and how to run it (Windows web UI, RunPod/A100 cloud training,
 troubleshooting), see **[INSTALL.md](INSTALL.md)**. The rest of this file
@@ -37,10 +35,9 @@ used - they all detect it automatically:
   calibration data to match). A dataset that mixes both formats (e.g.
   from concatenating two recording sessions made with different flags)
   fails fast with a clear error instead of training on ambiguous data.
-- `model_runner/model_runner.py` and `main/main.py` both read the
-  compiled `.hef`'s own input shape at startup and infer the same thing
-  from its channel count (3 = classic, 9 = the default 3-frame stack) -
-  so whichever `.hef` you drop next to either script, it drives the car
+- `main/main.py` reads the compiled `.hef`'s own input shape at startup
+  and infers the same thing from its channel count (3 = classic, 9 = the
+  default 3-frame stack) - so whichever `.hef` you run, it drives the car
   correctly either way.
 
 If a `driving_log.json` already exists, `data_recorder.py` keeps

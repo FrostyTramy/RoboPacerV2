@@ -10,10 +10,22 @@ duplicated byte-identically across every script.
 SERVO_CHANNEL = 0
 SERVO_MIN_PULSE = 900          # microseconds
 SERVO_MAX_PULSE = 2200         # microseconds
-SERVO_MIN_ANGLE = 45           # degrees
-SERVO_MAX_ANGLE = 135          # degrees
-SERVO_NEUTRAL_ANGLE = 90       # degrees
-SERVO_OFFSET = 4               # degrees
+# The only three steering numbers to calibrate. Each side's step size is
+# derived from them (see servo_esc.steering_label_to_angle): label 0 ->
+# STRAIGHT, label +1 (stick right) -> MIN, label -1 (stick left) -> MAX.
+# The two sides don't have to be the same distance from STRAIGHT - the
+# chassis turns the wheels more per servo degree on one side, so equal
+# wheel lock needs unequal servo travel.
+SERVO_MIN_ANGLE = 49           # degrees - full lock, label +1
+SERVO_MAX_ANGLE = 135          # degrees - full lock, label -1
+SERVO_STRAIGHT_ANGLE = 94      # degrees - wheels straight, label 0
+
+if not SERVO_MIN_ANGLE < SERVO_STRAIGHT_ANGLE < SERVO_MAX_ANGLE:
+    raise ValueError("hardware_config: need SERVO_MIN_ANGLE < SERVO_STRAIGHT_ANGLE < SERVO_MAX_ANGLE")
+
+# Xbox left stick: this fraction of travel around center counts as straight
+# (absorbs stick noise); the rest maps linearly onto label 0..1 per side.
+JOYSTICK_DEADZONE = 0.2
 
 # Throttle (ESC on PCA9685 channel 1)
 ESC_CHANNEL = 1

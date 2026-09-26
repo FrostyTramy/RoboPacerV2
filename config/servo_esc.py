@@ -23,8 +23,7 @@ from config.hardware_config import (
     SERVO_MIN_ANGLE,
     SERVO_MIN_PULSE,
     SERVO_MAX_PULSE,
-    SERVO_NEUTRAL_ANGLE,
-    SERVO_OFFSET,
+    SERVO_STRAIGHT_ANGLE,
     TRANSIENT_I2C_ERRNOS,
 )
 
@@ -36,7 +35,7 @@ class SteeringServo:
             min_pulse=SERVO_MIN_PULSE,
             max_pulse=SERVO_MAX_PULSE,
         )
-        self.angle = SERVO_NEUTRAL_ANGLE + SERVO_OFFSET
+        self.angle = SERVO_STRAIGHT_ANGLE
         self.center()
 
     def set_angle(self, angle):
@@ -51,7 +50,7 @@ class SteeringServo:
                 raise
 
     def center(self):
-        self.set_angle(SERVO_NEUTRAL_ANGLE + SERVO_OFFSET)
+        self.set_angle(SERVO_STRAIGHT_ANGLE)
 
     def release(self):
         try:
@@ -105,6 +104,12 @@ class ESC:
 
 
 def steering_label_to_angle(label):
+    """-1..1 label -> servo angle, scaled per side so +1 lands exactly on
+    SERVO_MIN_ANGLE and -1 on SERVO_MAX_ANGLE (no clamped dead travel on
+    the shorter side). Shared by the model (main.py) and the joystick."""
     label = max(-1.0, min(1.0, label))
-    angle = SERVO_NEUTRAL_ANGLE - label * (SERVO_MAX_ANGLE - SERVO_NEUTRAL_ANGLE) + SERVO_OFFSET
-    return int(max(SERVO_MIN_ANGLE, min(SERVO_MAX_ANGLE, angle)))
+    if label >= 0:
+        angle = SERVO_STRAIGHT_ANGLE - label * (SERVO_STRAIGHT_ANGLE - SERVO_MIN_ANGLE)
+    else:
+        angle = SERVO_STRAIGHT_ANGLE - label * (SERVO_MAX_ANGLE - SERVO_STRAIGHT_ANGLE)
+    return int(round(angle))

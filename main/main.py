@@ -122,7 +122,7 @@ for noisy in ("picamera2", "libcamera", "PIL"):
 # cruise_control.py/model_runner.py where they used to be duplicated.
 # ---------------------------------------------------------------------------
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root
-from config.camera_config import make_camera
+from config.camera_config import describe_settings, make_camera
 from config.hardware_config import (
     ESC_MAX_US,
     ESC_NEUTRAL_US,
@@ -500,7 +500,8 @@ def main():
         # --- Camera -----------------------------------------------------------
         picam2 = make_camera()
         picam2.start()
-        logging.info("Camera started")
+        logging.info("Camera started - " + describe_settings())
+        print("Camera: " + describe_settings())
 
         # --- Log detaliat (CSV, ritm fix) --------------------------------
         tick_csv_path = os.path.join(TICK_LOG_DIR, f"main_{time.strftime('%Y%m%d_%H%M%S')}.csv")

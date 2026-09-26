@@ -84,7 +84,7 @@ import cv2
 from evdev import ecodes, ff
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root
-from config.camera_config import FRAME_SIZE, make_camera
+from config.camera_config import SAVED_JPEG_QUALITY, describe_settings, make_camera
 from config.pca9685_init import init_pca9685
 from config.servo_esc import ESC, SteeringServo
 from config.estop import relay_cmd
@@ -116,11 +116,6 @@ logging.basicConfig(
 )
 for noisy in ("picamera2", "libcamera", "PIL"):
     logging.getLogger(noisy).setLevel(logging.CRITICAL)
-
-# ---------------------------------------------------------------------------
-# Camera - configuration lives in config/camera_config.py (shared by every script)
-# ---------------------------------------------------------------------------
-SAVED_FRAME_SIZE = (640, 480)  # frame size written to disk for training (matches FRAME_SIZE)
 
 # ---------------------------------------------------------------------------
 # Controller
@@ -203,7 +198,8 @@ def _writer_loop(write_queue, driving_log, frames_dir, legacy_format):
         if not frames_dir_ready:
             os.makedirs(frames_dir, exist_ok=True)
             frames_dir_ready = True
-        cv2.imwrite(os.path.join(frames_dir, image_filename), saved_frame)
+        cv2.imwrite(os.path.join(frames_dir, image_filename), saved_frame,
+                    [cv2.IMWRITE_JPEG_QUALITY, SAVED_JPEG_QUALITY])
         record = {
             "image_path": f"{os.path.basename(frames_dir)}/{image_filename}",
             "steering_angle": steering_label,
@@ -365,7 +361,8 @@ def main():
         # --- Camera -----------------------------------------------------------
         picam2 = make_camera()
         picam2.start()
-        logging.info("Camera started - 640x480 @ 120fps gain=16")
+        logging.info("Camera started - " + describe_settings())
+        print("Camera: " + describe_settings())
 
         print("\n-----------------------------------------------------")
         print("Apasa [A] pentru a INCEPE INREGISTRAREA/RESUME.")
@@ -455,11 +452,11 @@ def main():
                     current_fps = frame_count_fps / elapsed
 
                 image_filename = f"frame_{frame_index:05d}.jpg"
-                saved_frame = frame if SAVED_FRAME_SIZE == FRAME_SIZE else cv2.resize(frame, SAVED_FRAME_SIZE, interpolation=cv2.INTER_AREA)
                 try:
-                    # .copy() - the writer thread reads this after capture_array()
-                    # may already be filling the next frame's buffer.
-                    write_queue.put_nowait((image_filename, saved_frame.copy(), steering_label, time.time()))
+                    # Saved exactly as captured (camera_config.FRAME_SIZE). .copy() -
+                    # the writer thread reads this after capture_array() may
+                    # already be filling the next frame's buffer.
+                    write_queue.put_nowait((image_filename, frame.copy(), steering_label, time.time()))
                 except queue.Full:
                     logging.warning(f"Write queue full - dropped frame {frame_index:05d} (disk falling behind)")
                 print(

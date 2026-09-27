@@ -15,9 +15,11 @@
     <div class="top-actions">
       <button class="btn secondary" id="wifi-toggle">WiFi</button>
       <button class="btn secondary" id="bt-toggle">Bluetooth</button>
+      <button class="btn danger" id="shutdown-btn">Shutdown</button>
       <a class="btn secondary" href="{{ url_for('tools_page') }}">Tools</a>
     </div>
   </div>
+  <div class="status-line error-text" id="shutdown-status"></div>
 
   <div id="wifi-panel" class="wifi-panel hidden">
     <h2>Conexiune WiFi</h2>
@@ -109,6 +111,27 @@
         el.innerHTML = isRunning ? 'ruleaza' : 'deschide &rarr;';
       });
     }
+
+    // --- Shutdown ---
+    document.getElementById('shutdown-btn').addEventListener('click', () => {
+      if (!confirm('Închide Raspberry Pi-ul acum? Un script care ruleaza va fi oprit intai.')) return;
+      const btn = document.getElementById('shutdown-btn');
+      const statusEl = document.getElementById('shutdown-status');
+      btn.disabled = true;
+      statusEl.textContent = 'Se inchide...';
+      fetch('/api/shutdown', { method: 'POST' }).then(r => r.json()).then(data => {
+        if (!data.ok) {
+          statusEl.textContent = 'Eroare: ' + (data.error || 'necunoscuta');
+          btn.disabled = false;
+        }
+        // ok: leave the "Se inchide..." message up - the Pi is on its way down
+        // and this page is about to stop responding anyway.
+      }).catch(() => {
+        // The connection can drop before the response arrives if the Pi is
+        // already going down - that's success, not a real error.
+        statusEl.textContent = 'Se inchide (sau conexiunea s-a intrerupt deja)...';
+      });
+    });
 
     // --- WiFi panel ---
     const wifiPanel = document.getElementById('wifi-panel');

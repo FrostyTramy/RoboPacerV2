@@ -645,6 +645,18 @@ def api_stop():
     return jsonify({"ok": True, "stopped": stopped, "running": None})
 
 
+@app.route("/api/shutdown", methods=["POST"])
+def api_shutdown():
+    with _action_lock:
+        _stop_current("shutdown din dashboard")  # relay off, motor/servo safe, before power goes
+        logging.info("Shutdown cerut din dashboard")
+        try:
+            subprocess.Popen(["sudo", "-n", "poweroff"])
+        except OSError as e:
+            return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True})
+
+
 @app.route("/api/relay", methods=["POST"])
 def api_relay():
     data = request.get_json(force=True, silent=True) or {}

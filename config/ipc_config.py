@@ -2,14 +2,17 @@
 Unix domain socket paths and timing constants for the IPC channels shared
 between safety/estop_listener.py (server), the driving scripts (clients of
 RELAY_SOCKET/ODO_SOCKET), and dashboard/system_stats.py (client of
-RELAY_SOCKET, MAIN_CONTROL_SOCKET and MANUAL_DRIVE_CONTROL_SOCKET). Values taken verbatim from
-main/main.py, manual_drive/manual_drive.py, and cruise_control/cruise_control.py.
+RELAY_SOCKET, MAIN_CONTROL_SOCKET, MANUAL_DRIVE_CONTROL_SOCKET and
+STEERING_CALIBRATE_CONTROL_SOCKET). Values taken verbatim from main/main.py,
+manual_drive/manual_drive.py, cruise_control/cruise_control.py, and
+tools/steering_calibrate.py.
 """
 
 RELAY_SOCKET = "/tmp/esp32_relay.sock"
 ODO_SOCKET = "/tmp/esp32_odometry.sock"
 MAIN_CONTROL_SOCKET = "/tmp/main_autopilot_control.sock"
 MANUAL_DRIVE_CONTROL_SOCKET = "/tmp/manual_drive_control.sock"
+STEERING_CALIBRATE_CONTROL_SOCKET = "/tmp/steering_calibrate_control.sock"
 
 ODO_RECONNECT_SLEEP_SECONDS = 2.0
 ODO_STALE_TIMEOUT_SECONDS = 1.0     # no fresh RPM past this -> cruise control auto-stops

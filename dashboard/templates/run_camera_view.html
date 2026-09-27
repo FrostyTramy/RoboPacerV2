@@ -1,0 +1,34 @@
+{% extends "run_base.html" %}
+
+{% block config %}
+  <div class="status-line">
+    Stream live cu exact ce vede camera (setarile din config/camera_config.py). Opreste main /
+    data_recorder mai intai - camera e exclusiva unui singur proces.
+  </div>
+{% endblock %}
+
+{% block live %}
+  <h2>Live</h2>
+  <div id="cam-wrap" class="hidden">
+    <img id="cam-img" alt="camera live" style="max-width: 100%; border-radius: 10px; border: 1px solid var(--border);">
+  </div>
+  <div class="status-line" id="cam-hint">Porneste ca sa vezi imaginea.</div>
+{% endblock %}
+
+{% block page_script %}
+<script>
+  function pollLive() {
+    fetch('/api/status').then(r => r.json()).then(d => {
+      const mine = !!d.running && d.running.id === SCRIPT_ID;
+      document.getElementById('cam-wrap').classList.toggle('hidden', !mine);
+      document.getElementById('cam-hint').classList.toggle('hidden', mine);
+      const img = document.getElementById('cam-img');
+      if (mine) {
+        if (!img.getAttribute('src')) img.src = `http://${window.location.hostname}:8081/stream`;
+      } else if (img.getAttribute('src')) {
+        img.removeAttribute('src');
+      }
+    }).catch(() => {});
+  }
+</script>
+{% endblock %}

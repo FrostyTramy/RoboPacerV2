@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="ro">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tools - RoboPacerV2</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="top-row">
+    <div>
+      <a href="{{ url_for('home') }}">&larr; Acasa</a>
+      <h1>Tools</h1>
+    </div>
+  </div>
+
+  {% include "_status_bar.html" %}
+
+  <h2>Fisiere in tools/</h2>
+  <div class="script-list">
+    {% for t in tools %}
+      {% if t.script_id %}
+      <a class="script-card" href="{{ url_for('run_page', script_id=t.script_id) }}">
+        <span>
+          <span class="name">{{ t.filename }}</span>
+          <span class="desc">{{ t.description }}</span>
+        </span>
+        <span class="badge muted" id="script-badge-{{ t.script_id }}">deschide &rarr;</span>
+      </a>
+      {% else %}
+      <div class="script-card informational">
+        <span>
+          <span class="name">{{ t.filename }}</span>
+          <span class="desc">{{ t.description }}</span>
+        </span>
+        <span class="badge muted">ruleaza din terminal</span>
+      </div>
+      {% endif %}
+    {% endfor %}
+    {% if not tools %}
+    <div class="status-line">Niciun fisier .py in tools/.</div>
+    {% endif %}
+  </div>
+
+  <script>
+    // Only reacts to the same-origin status stream from _status_bar.html -
+    // no data here comes from outside the dashboard.
+    function onStatus(payload) {
+      const running = payload.running;
+      document.querySelectorAll('[id^="script-badge-"]').forEach(el => {
+        const isRunning = !!running && el.id === `script-badge-${running.id}`;
+        el.className = isRunning ? 'badge ok' : 'badge muted';
+        el.innerHTML = isRunning ? 'ruleaza' : 'deschide &rarr;';
+      });
+    }
+  </script>
+</body>
+</html>

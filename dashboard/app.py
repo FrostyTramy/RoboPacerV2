@@ -29,6 +29,7 @@ the running script - and safety/estop_listener.py independently kills every
 driving script when the ESP32 reports the relay going off (!!ESTOP!!).
 """
 
+import ast
 import json
 import logging
 import math
@@ -67,12 +68,18 @@ LOG_KEEPALIVE_SECONDS = 5
 DISTANCE_M_MIN = 1.0
 DISTANCE_M_MAX = 50000.0
 SPEED_MODES = ("cruise", "controller", "none")
+STEERING_TARGETS = ("middle", "left", "right")
 
 # Same rule as data_recorder.py's DATASET_NAME_RE - a folder with any other
 # name can't be picked here (and the recorder would refuse it anyway).
 DATASET_NAME_RE = re.compile(r"[A-Za-z0-9_-]+")
 FRAME_NAME_RE = re.compile(r"frame_(\d+)\.jpg")
 
+TOOLS_DIR = os.path.join(REPO_ROOT, "tools")
+
+# "main" scripts are the home page's script-list; "tools" ones are on the
+# separate /tools page (same global one-at-a-time mutex either way - they
+# all touch the same I2C bus / camera / relay).
 SCRIPTS = {
     "main": {
         "id": "main",
@@ -80,6 +87,7 @@ SCRIPTS = {
         "description": "Modelul la volan + viteza: cruise, controller sau doar steering",
         "path": os.path.join(REPO_ROOT, "main", "main.py"),
         "template": "run_main.html",
+        "category": "main",
     },
     "data_recorder": {
         "id": "data_recorder",
@@ -87,6 +95,7 @@ SCRIPTS = {
         "description": "Condus manual, inregistreaza cadre + steering pentru antrenare",
         "path": os.path.join(REPO_ROOT, "data_recorder", "data_recorder.py"),
         "template": "run_data_recorder.html",
+        "category": "main",
     },
     "manual_drive": {
         "id": "manual_drive",
@@ -94,6 +103,23 @@ SCRIPTS = {
         "description": "Condus manual cu controller-ul, distanta/viteza live",
         "path": os.path.join(REPO_ROOT, "manual_drive", "manual_drive.py"),
         "template": "run_manual_drive.html",
+        "category": "main",
+    },
+    "steering_calibrate": {
+        "id": "steering_calibrate",
+        "name": "Calibrare directie",
+        "description": "Seteaza mijlocul si limitele stanga/dreapta ale servo-ului, live",
+        "path": os.path.join(TOOLS_DIR, "steering_calibrate.py"),
+        "template": "run_steering_calibrate.html",
+        "category": "tools",
+    },
+    "camera_view": {
+        "id": "camera_view",
+        "name": "Camera (live)",
+        "description": "Vezi exact ce vede camera, ca in main / data_recorder",
+        "path": os.path.join(TOOLS_DIR, "camera_view.py"),
+        "template": "run_camera_view.html",
+        "category": "tools",
     },
 }
 
@@ -144,6 +170,47 @@ def list_datasets():
     # Natural sort (set2 before set10).
     datasets.sort(key=lambda d: [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", d["name"])])
     return datasets
+
+
+def _first_paragraph(docstring):
+    """First paragraph of a tools/*.py module docstring, for the Tools page
+    card - skipping the "Title\\n====" header every tool's docstring opens
+    with, and capped so a long intro doesn't blow up the card."""
+    if not docstring:
+        return ""
+    lines = docstring.strip().splitlines()
+    if len(lines) >= 2 and re.fullmatch(r"[=-]+", lines[1].strip()):
+        lines = lines[2:]
+    para = "\n".join(lines).strip().split("\n\n", 1)[0]
+    para = " ".join(line.strip() for line in para.splitlines())
+    return para[:157] + "..." if len(para) > 160 else para
+
+
+def list_tools_dir():
+    """Every *.py in tools/, with its module docstring's first paragraph and
+    (if it's registered in SCRIPTS) the id to link to on /tools - so a new
+    file dropped in tools/ shows up here without any dashboard change, and
+    only the ones actually wired up as a script are clickable."""
+    entries = []
+    try:
+        names = sorted(f for f in os.listdir(TOOLS_DIR) if f.endswith(".py") and not f.startswith("_"))
+    except OSError:
+        return entries
+    by_path = {os.path.realpath(s["path"]): s["id"] for s in SCRIPTS.values() if s.get("category") == "tools"}
+    for name in names:
+        path = os.path.join(TOOLS_DIR, name)
+        doc = None
+        try:
+            with open(path, "r") as f:
+                doc = ast.get_docstring(ast.parse(f.read(), filename=name))
+        except (OSError, SyntaxError, ValueError):
+            pass
+        entries.append({
+            "filename": name,
+            "description": _first_paragraph(doc) or "(fara descriere)",
+            "script_id": by_path.get(os.path.realpath(path)),
+        })
+    return entries
 
 
 def _is_alive(running):
@@ -291,7 +358,12 @@ def _stop_current(reason):
 
 @app.route("/")
 def home():
-    return render_template("home.html", scripts=list(SCRIPTS.values()))
+    return render_template("home.html", scripts=[s for s in SCRIPTS.values() if s["category"] == "main"])
+
+
+@app.route("/tools")
+def tools_page():
+    return render_template("tools.html", tools=list_tools_dir())
 
 
 @app.route("/run/<script_id>")
@@ -331,6 +403,30 @@ def api_manual_drive_status():
 @app.route("/api/manual_drive/reset_distance", methods=["POST"])
 def api_manual_drive_reset_distance():
     return jsonify({"ok": system_stats.reset_manual_drive_distance()})
+
+
+@app.route("/api/steering_calibrate/status")
+def api_steering_calibrate_status():
+    return jsonify(system_stats.get_steering_calibrate_status() or {"ok": False, "error": "not_running"})
+
+
+@app.route("/api/steering_calibrate/target", methods=["POST"])
+def api_steering_calibrate_target():
+    data = request.get_json(force=True, silent=True) or {}
+    target = data.get("target")
+    if target not in STEERING_TARGETS:
+        return jsonify({"ok": False, "error": "invalid_target"}), 400
+    return jsonify(system_stats.set_steering_calibrate_target(target) or {"ok": False, "error": "not_running"})
+
+
+@app.route("/api/steering_calibrate/save", methods=["POST"])
+def api_steering_calibrate_save():
+    return jsonify(system_stats.save_steering_calibrate() or {"ok": False, "error": "not_running"})
+
+
+@app.route("/api/steering_calibrate/reset", methods=["POST"])
+def api_steering_calibrate_reset():
+    return jsonify(system_stats.reset_steering_calibrate() or {"ok": False, "error": "not_running"})
 
 
 @app.route("/api/main/model_info")
@@ -437,10 +533,21 @@ def _manual_drive_args(data):
     return [], None
 
 
+def _steering_calibrate_args(data):
+    return [], None
+
+
+def _camera_view_args(data):
+    # Headless dashboard box - always the MJPEG server, never the cv2 window.
+    return ["--web"], None
+
+
 ARG_BUILDERS = {
     "main": _main_args,
     "data_recorder": _data_recorder_args,
     "manual_drive": _manual_drive_args,
+    "steering_calibrate": _steering_calibrate_args,
+    "camera_view": _camera_view_args,
 }
 
 

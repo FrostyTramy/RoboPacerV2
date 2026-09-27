@@ -22,7 +22,12 @@ REPO_ROOT = os.path.dirname(BASE_DIR)
 MAIN_MODELS_DIR = os.path.join(REPO_ROOT, "main", "models")
 
 sys.path.append(REPO_ROOT)
-from config.ipc_config import MAIN_CONTROL_SOCKET, MANUAL_DRIVE_CONTROL_SOCKET, RELAY_SOCKET  # noqa: E402
+from config.ipc_config import (  # noqa: E402
+    MAIN_CONTROL_SOCKET,
+    MANUAL_DRIVE_CONTROL_SOCKET,
+    RELAY_SOCKET,
+    STEERING_CALIBRATE_CONTROL_SOCKET,
+)
 
 try:
     from config.battery import read_battery  # INA219 over I2C (smbus2)
@@ -189,6 +194,23 @@ def reset_manual_drive_distance():
     """Zeroes manual_drive's displayed distance + avg/max speed (its final
     summary still reports the real total)."""
     return _query_control_socket(MANUAL_DRIVE_CONTROL_SOCKET, "RESET_DISTANCE") is not None
+
+
+def get_steering_calibrate_status():
+    """tools/steering_calibrate.py's live target/values/angle."""
+    return _query_control_socket(STEERING_CALIBRATE_CONTROL_SOCKET, "STATUS")
+
+
+def set_steering_calibrate_target(target):
+    return _query_control_socket(STEERING_CALIBRATE_CONTROL_SOCKET, f"SET_TARGET {target}")
+
+
+def save_steering_calibrate():
+    return _query_control_socket(STEERING_CALIBRATE_CONTROL_SOCKET, "SAVE")
+
+
+def reset_steering_calibrate():
+    return _query_control_socket(STEERING_CALIBRATE_CONTROL_SOCKET, "RESET")
 
 
 def get_all_stats(hailo_allowed=True):

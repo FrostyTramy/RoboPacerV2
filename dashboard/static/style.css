@@ -104,6 +104,12 @@ h2 { font-size: 1.05rem; margin: 0 0 10px; color: var(--muted); font-weight: 600
 .script-card:hover { border-color: var(--accent); }
 .script-card .name { font-weight: 600; }
 .script-card .desc { display: block; color: var(--muted); font-size: 0.8rem; margin-top: 3px; }
+.script-card.informational { cursor: default; }
+.script-card.informational:hover { border-color: var(--border); }
+
+/* --- steering calibration: which value the D-pad currently edits -------- */
+.card.active-calib { border-color: var(--accent); }
+.card.active-calib .value { color: var(--accent); }
 
 .status-bar {
   background: var(--panel);

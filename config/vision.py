@@ -62,16 +62,19 @@ def preprocess_quantized(frame_bgr, lut_bgr):
     return cv2.cvtColor(cv2.LUT(small, lut_bgr), cv2.COLOR_BGR2RGB)
 
 
-def speed_scaled_gap_seconds(current_kmh):
+def speed_scaled_gap_seconds(current_kmh, train_speed_kmh=TRAIN_SPEED_KMH):
     """FRAME_STACK_GAP_SECONDS, compressed when running faster than
-    TRAIN_SPEED_KMH so the *distance* between stacked frames - and
+    train_speed_kmh so the *distance* between stacked frames - and
     therefore the apparent motion the model sees - matches training,
-    instead of growing with speed. A no-op at or below TRAIN_SPEED_KMH
+    instead of growing with speed. A no-op at or below train_speed_kmh
     (running slower than training isn't the reported problem, and it would
-    need looking back further than frame_history is trimmed to keep)."""
-    if current_kmh <= TRAIN_SPEED_KMH:
+    need looking back further than frame_history is trimmed to keep).
+    train_speed_kmh defaults to the config constant but main.py's --train-
+    speed-kmh overrides it per run; the caller skips this entirely when
+    the dashboard's "speed compensation" checkbox is off."""
+    if current_kmh <= train_speed_kmh:
         return FRAME_STACK_GAP_SECONDS
-    return max(FRAME_STACK_MIN_GAP_SECONDS, FRAME_STACK_GAP_SECONDS * TRAIN_SPEED_KMH / current_kmh)
+    return max(FRAME_STACK_MIN_GAP_SECONDS, FRAME_STACK_GAP_SECONDS * train_speed_kmh / current_kmh)
 
 
 def select_stack_frames(history, now, frame_stack_n=FRAME_STACK_N, gap_seconds=FRAME_STACK_GAP_SECONDS):

@@ -490,6 +490,20 @@ def _main_args(data):
         if hef_path is None:
             return None, ("invalid_hef_path", 400)
 
+    speed_compensation = _bool_param(data, "speed_compensation", False)
+    if speed_compensation is None:
+        return None, ("invalid_speed_compensation", 400)
+    train_speed_kmh = data.get("train_speed_kmh")
+    if speed_compensation:
+        if (isinstance(train_speed_kmh, bool) or not isinstance(train_speed_kmh, (int, float))
+                or not math.isfinite(train_speed_kmh)):
+            return None, ("missing_train_speed_kmh", 400)
+        train_speed_kmh = float(train_speed_kmh)
+        if not (0.1 <= train_speed_kmh <= TARGET_SPEED_MAX_KMH):
+            return None, ("train_speed_kmh_out_of_range", 400)
+    elif train_speed_kmh is not None:
+        return None, ("train_speed_kmh_not_allowed", 400)
+
     args = ["--speed-mode", speed_mode]
     if hef_path is not None:
         args += ["--hef", hef_path]
@@ -501,6 +515,8 @@ def _main_args(data):
         args.append("--smooth-steering")
     if display:
         args.append("--display")
+    if speed_compensation:
+        args += ["--speed-compensation", "--train-speed-kmh", str(train_speed_kmh)]
     return args, None
 
 

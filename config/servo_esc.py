@@ -121,20 +121,23 @@ def steering_label_to_angle(label):
     return int(round(angle))
 
 
-def speed_scaled_steering(label, current_kmh):
+def speed_scaled_steering(label, current_kmh, train_speed_kmh=TRAIN_SPEED_KMH):
     """Damps mid-range steering labels more the faster the car runs above
-    TRAIN_SPEED_KMH (the model's training data speed), while leaving 0
+    train_speed_kmh (the model's training data speed), while leaving 0
     (straight) and +-1 (full lock) exactly unchanged - so a genuinely sharp
     turn can always still get full lock, only the in-between corrections
     that tend to cause oscillation at speed get pulled toward straight.
 
     Same idea as an RC transmitter's steering "expo" curve: label**p with
     p > 1 flattens the response near 0 without touching the endpoints.
-    p grows with how far current_kmh is over TRAIN_SPEED_KMH (capped by
+    p grows with how far current_kmh is over train_speed_kmh (capped by
     STEERING_EXPO_MAX_EXTRA) and is exactly 1 (no-op) at or under it - a
-    run at/under the model's own training speed is never affected."""
-    if current_kmh <= TRAIN_SPEED_KMH or label == 0.0:
+    run at/under the model's own training speed is never affected.
+    train_speed_kmh defaults to the config constant but main.py's --train-
+    speed-kmh (the dashboard's "speed compensation" checkbox) overrides it
+    per run; the caller skips this entirely when compensation is off."""
+    if current_kmh <= train_speed_kmh or label == 0.0:
         return label
-    extra = min(STEERING_EXPO_MAX_EXTRA, (current_kmh - TRAIN_SPEED_KMH) / STEERING_EXPO_SPEED_SCALE_KMH)
+    extra = min(STEERING_EXPO_MAX_EXTRA, (current_kmh - train_speed_kmh) / STEERING_EXPO_SPEED_SCALE_KMH)
     sign = 1.0 if label > 0 else -1.0
     return sign * min(1.0, abs(label)) ** (1.0 + extra)

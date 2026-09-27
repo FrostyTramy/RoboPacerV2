@@ -58,13 +58,15 @@ fixed-cadence CSV in logs/, at TICK_INTERVAL_SECONDS.
 --------------------------------------------------------------------------
 Speed-compensated steering (train slow, run fast)
 --------------------------------------------------------------------------
-The model only ever sees training data recorded around TRAIN_SPEED_KMH
-(config/hardware_config.py) - running much faster than that puts it out
-of its training distribution (frame-to-frame motion is bigger than it's
-ever seen, and a small heading error needs correcting sooner) and is a
-likely cause of oscillation/oversteer at speed ("snaking"). Above
-TRAIN_SPEED_KMH, two independent compensations kick in automatically -
-both exactly a no-op at or under it:
+The model only ever sees training data recorded around whatever speed you
+tell it (the dashboard's "speed compensation" checkbox + --train-speed-kmh,
+off by default) - running much faster than that puts it out of its
+training distribution (frame-to-frame motion is bigger than it's ever
+seen, and a small heading error needs correcting sooner) and is a likely
+cause of oscillation/oversteer at speed ("snaking"). With --speed-
+compensation, above --train-speed-kmh two independent compensations kick
+in automatically - both exactly a no-op at or under it (and both entirely
+skipped, zero effect, when the flag is off):
   - The frame stack's time gap between images is compressed
     (speed_scaled_gap_seconds() in config/vision.py) so the *distance*
     between stacked frames matches training instead of growing with speed.
@@ -418,6 +420,12 @@ def parse_args():
     ap.add_argument("--hef", metavar="PATH", default=None,
                      help="Model .hef de folosit (cale absoluta, oriunde pe Pi). Implicit: "
                           "singurul .hef din main/models/")
+    ap.add_argument("--speed-compensation", action="store_true",
+                     help="Activeaza compensarea steering-ului pe viteza (vezi docstring-ul de mai sus) - "
+                          "necesita --train-speed-kmh")
+    ap.add_argument("--train-speed-kmh", type=float, default=None,
+                     help=f"Viteza la care ai antrenat modelul, in km/h (0.1-{TARGET_SPEED_MAX_KMH:.0f}) - "
+                          "obligatoriu cu --speed-compensation, interzis fara el")
     args = ap.parse_args()
 
     if args.speed_mode == "cruise":
@@ -434,6 +442,17 @@ def parse_args():
     if args.distance_m is not None and not (1.0 <= args.distance_m <= 50000.0):
         raise SystemExit(f"--distance-m trebuie sa fie intre 1 si 50000 (primit: {args.distance_m})")
 
+    if args.speed_compensation:
+        if args.train_speed_kmh is None:
+            raise SystemExit("--train-speed-kmh este obligatoriu cu --speed-compensation")
+        if not (0.1 <= args.train_speed_kmh <= TARGET_SPEED_MAX_KMH):
+            raise SystemExit(
+                f"--train-speed-kmh trebuie sa fie intre 0.1 si {TARGET_SPEED_MAX_KMH:.0f} "
+                f"(primit: {args.train_speed_kmh})"
+            )
+    elif args.train_speed_kmh is not None:
+        raise SystemExit("--train-speed-kmh necesita --speed-compensation")
+
     return args
 
 
@@ -444,6 +463,10 @@ def main():
     raw_steering = args.raw_steering
     target_kmh = args.target_kmh if speed_mode == "cruise" else 0.0
     distance_target_m = args.distance_m
+    # None = compensation off (dashboard checkbox unchecked) - the two call
+    # sites below skip speed_scaled_*() entirely rather than passing a
+    # value that would make them a no-op, so "off" is really off.
+    train_speed_kmh = args.train_speed_kmh if args.speed_compensation else None
 
     signal.signal(signal.SIGTERM, _handle_sigterm)
 
@@ -723,8 +746,9 @@ def main():
                                 frame_history.popleft()
                             # filtered_kmh is last tick's speed (this tick's isn't
                             # computed until below) - at 50Hz that lag doesn't matter.
-                            planes = select_stack_frames(
-                                frame_history, now, frame_stack_n, speed_scaled_gap_seconds(filtered_kmh))
+                            gap_seconds = (FRAME_STACK_GAP_SECONDS if train_speed_kmh is None
+                                           else speed_scaled_gap_seconds(filtered_kmh, train_speed_kmh))
+                            planes = select_stack_frames(frame_history, now, frame_stack_n, gap_seconds)
                             inp = cv2.merge([p for frame_planes in planes for p in frame_planes])[np.newaxis]
                         else:
                             inp = img_q[np.newaxis]
@@ -737,8 +761,10 @@ def main():
                             steer_cmd = 0.0 if abs(smooth_label) < STEERING_DEADZONE else smooth_label
                         # Damp mid-range corrections when running above the
                         # model's training speed (see config/servo_esc.py) -
-                        # again using last tick's speed; a no-op under it.
-                        steer_cmd = speed_scaled_steering(steer_cmd, filtered_kmh)
+                        # again using last tick's speed; skipped entirely
+                        # when the dashboard's checkbox is off.
+                        if train_speed_kmh is not None:
+                            steer_cmd = speed_scaled_steering(steer_cmd, filtered_kmh, train_speed_kmh)
 
                         # Steering applies always, regardless of `engaged` -
                         # so the operator can see the model tracking the

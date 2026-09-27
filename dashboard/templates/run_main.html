@@ -56,6 +56,18 @@
     <input type="checkbox" id="display">
     <label for="display">Fereastra preview (--display)</label>
   </div>
+
+  <div class="field-group checkbox">
+    <input type="checkbox" id="speed-compensation">
+    <label for="speed-compensation">Compensare steering pe viteza (antrenat incet, condus mai rapid)</label>
+  </div>
+  <div class="field-group hidden" id="train-speed-group">
+    <label>Viteza la care ai antrenat modelul (km/h)</label>
+    <input type="text" id="train-speed-kmh" value="3.0" inputmode="decimal">
+    <div class="status-line" style="margin-bottom: 0;">
+      Viteza curenta vine live de la senzorul de roata, in orice mod - nu trebuie sa o dai tu.
+    </div>
+  </div>
 {% endblock %}
 
 {% block live %}
@@ -192,6 +204,13 @@
   modeButtons.forEach(btn => btn.addEventListener('click', () => setMode(btn.dataset.mode)));
   setMode('cruise');
 
+  // --- Speed-compensated steering (train slow, run fast) -----------------
+  const speedCompCheckbox = document.getElementById('speed-compensation');
+  const trainSpeedGroup = document.getElementById('train-speed-group');
+  speedCompCheckbox.addEventListener('change', () => {
+    trainSpeedGroup.classList.toggle('hidden', !speedCompCheckbox.checked);
+  });
+
   let unitIsPace = false;
   function paceFromKmh(kmh) {
     if (!kmh || kmh <= 0) return '--:--';
@@ -233,6 +252,13 @@
         throw new Error(`Distanta invalida (${DISTANCE_MIN} - ${DISTANCE_MAX} m).`);
       }
     }
+    let trainSpeedKmh = null;
+    if (speedCompCheckbox.checked) {
+      trainSpeedKmh = parseFloat(document.getElementById('train-speed-kmh').value.replace(',', '.'));
+      if (!Number.isFinite(trainSpeedKmh) || trainSpeedKmh < 0.1 || trainSpeedKmh > TARGET_SPEED_MAX_KMH) {
+        throw new Error(`Viteza de antrenare invalida (0.1 - ${TARGET_SPEED_MAX_KMH} km/h).`);
+      }
+    }
     return {
       speed_mode: currentMode,
       target_kmh: targetKmh,
@@ -240,6 +266,8 @@
       raw_steering: document.getElementById('raw-steering').checked,
       display: document.getElementById('display').checked,
       hef_path: chosenHef,
+      speed_compensation: speedCompCheckbox.checked,
+      train_speed_kmh: trainSpeedKmh,
     };
   }
 

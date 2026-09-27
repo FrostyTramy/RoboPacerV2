@@ -33,11 +33,16 @@ Starts from whatever is in config/hardware_config.py right now (not a fixed
 page; Reset on the page reverts unsaved edits back to the last saved values
 without restarting this script.
 
-Only the steering servo moves - the ESC/motor is never armed or pulsed.
-Still needs the relay ON (servo shares the 3S LiPo feed through it, see
-HARDWARE.md), so this turns the relay on at start and off at exit exactly
-like the driving scripts, and can't run at the same time as main /
-data_recorder / manual_drive (one script at a time, dashboard-enforced).
+The motor works too, driven the same way as manual_drive.py: the right
+trigger is gas, the left trigger is brake, straight to the ESC pulse (no
+speed regulator) - so you can drive the car around right after calibrating
+without switching scripts. ESC arming follows manual_drive.py's order
+exactly (PWM neutral set up before the relay powers it, then held at the
+arm pulse for ESC_ARM_HOLD_SECONDS) and shuts down the same way (neutral,
+then hard stop, with a rumble confirmation) - see config/servo_esc.py's
+ESC class. Turns the relay on at start and off at exit like every driving
+script, and can't run at the same time as main / data_recorder /
+manual_drive (one script at a time, dashboard-enforced).
 
 Usage:
     python3 tools/steering_calibrate.py
@@ -55,7 +60,7 @@ import sys
 import threading
 import time
 
-from evdev import InputDevice, ecodes
+from evdev import InputDevice, ecodes, ff
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(REPO_ROOT)
@@ -70,7 +75,7 @@ from config.input_devices import find_xbox_controller  # noqa: E402
 from config.ipc_config import STEERING_CALIBRATE_CONTROL_SOCKET  # noqa: E402
 from config.joystick_steering import AXIS_CENTER, AXIS_MAX  # noqa: E402
 from config.pca9685_init import init_pca9685  # noqa: E402
-from config.servo_esc import SteeringServo  # noqa: E402
+from config.servo_esc import ESC, SteeringServo  # noqa: E402
 
 HARDWARE_CONFIG_PATH = os.path.join(REPO_ROOT, "config", "hardware_config.py")
 
@@ -257,13 +262,42 @@ def main():
     signal.signal(signal.SIGTERM, _handle_sigterm)
 
     pca = None
+    esc = None
     steering = None
     controller = None
     control_thread = None
     control_stop_event = None
+    last_rumble_effect_id = None
+
+    def rumble(duration_ms):
+        """Non-blocking rumble, one effect at a time - see manual_drive.py."""
+        nonlocal last_rumble_effect_id
+        if controller is None:
+            return
+        if last_rumble_effect_id is not None:
+            try:
+                controller.erase_effect(last_rumble_effect_id)
+            except OSError:
+                pass
+            last_rumble_effect_id = None
+        try:
+            effect = ff.Effect(
+                ecodes.FF_RUMBLE, -1, 0, ff.Trigger(0, 0), ff.Replay(duration_ms, 0),
+                ff.EffectType(ff_rumble_effect=ff.Rumble(strong_magnitude=0xFFFF, weak_magnitude=0xFFFF)),
+            )
+            last_rumble_effect_id = controller.upload_effect(effect)
+            controller.write(ecodes.EV_FF, last_rumble_effect_id, 1)
+        except OSError:
+            pass
 
     try:
+        # Same order as manual_drive.py: ESC configured and at neutral BEFORE
+        # the relay powers it, so it never sits powered without a valid PWM
+        # signal (many ESCs enter failsafe if that happens for more than a
+        # moment) - then esc.arm() holds the arm pulse while it's live.
         pca = init_pca9685()
+        esc = ESC(pca)
+        esc.neutral()
         steering = SteeringServo(pca)
 
         if args.device:
@@ -279,6 +313,7 @@ def main():
         joystick_x = _initial_axis_x(controller)
 
         relay_cmd("RELAY_ON")
+        esc.arm()
 
         control_stop_event = threading.Event()
         control_thread = threading.Thread(target=_control_server_loop, args=(control_stop_event,), daemon=True)
@@ -286,10 +321,12 @@ def main():
 
         print(f"Calibrare directie pornita. Valori curente: stanga(max)={SERVO_MAX_ANGLE} "
               f"mijloc={SERVO_STRAIGHT_ANGLE} dreapta(min)={SERVO_MIN_ANGLE}")
-        print("Alege ce calibrezi pe pagina web. Stick = testeaza virajul, D-pad stanga/dreapta = -1/+1 grad. "
-              "Salveaza / Reseteaza tot de pe pagina.")
+        print("Alege ce calibrezi pe pagina web. Stick = testeaza virajul, D-pad stanga/dreapta = -1/+1 grad, "
+              "RT/LT = gaz/frana (ca la Manual Drive). Salveaza / Reseteaza tot de pe pagina.")
 
         last_hat0x = 0
+        gas_value = 0
+        brake_value = 0
         controller_lost = False
         last_reconnect_try = 0.0
 
@@ -322,8 +359,10 @@ def main():
                     events = []
                     controller_lost = True
                     last_reconnect_try = 0.0
+                    gas_value = brake_value = 0
+                    esc.neutral()
                     _update_state(controller_connected=False)
-                    print(f"Controller pierdut ({e}) - astept reconectarea...")
+                    print(f"Controller pierdut ({e}) - ESC la neutru, astept reconectarea...")
                 for event in events:
                     if event.type != ecodes.EV_ABS:
                         continue
@@ -338,6 +377,17 @@ def main():
                         last_hat0x = event.value
                         if step:
                             _adjust(_get_state()["target"], step)
+                    else:
+                        # Same trigger names/formula as manual_drive.py - RT/LT
+                        # on a Bluetooth Xbox pad report as ABS_GAS/ABS_BRAKE.
+                        abs_name = ecodes.ABS.get(event.code)
+                        if abs_name == "ABS_GAS":
+                            gas_value = event.value
+                        elif abs_name == "ABS_BRAKE":
+                            brake_value = event.value
+                        else:
+                            continue
+                        esc.set_pulse_us(ESC.pulse_from_gas_brake(gas_value, brake_value))
 
             # Re-applied every tick (not just on a new event) so a D-pad edit
             # while the stick is held at a lock moves the wheel immediately.
@@ -354,6 +404,14 @@ def main():
     finally:
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         relay_cmd("RELAY_OFF")
+        if esc is not None:
+            esc.neutral()
+            time.sleep(0.1)
+            esc.stop()
+            rumble(150)
+            time.sleep(0.25)
+            rumble(150)
+            time.sleep(0.2)
         if steering is not None:
             steering.release()
         if pca is not None:

@@ -49,6 +49,7 @@ ALLOWED_SCRIPTS=(
     "$REPO_ROOT/main/main.py"
     "$REPO_ROOT/data_recorder/data_recorder.py"
     "$REPO_ROOT/manual_drive/manual_drive.py"
+    "$REPO_ROOT/tools/steering_calibrate.py"
 )
 
 # --- Functions ----------------------------------------------------------

@@ -14,6 +14,7 @@ Dreapta (right) - then use the controller:
                             right now (in memory - nothing is written to
                             disk until Save), so you can immediately feel
                             the effect of an edit.
+    RT / LT                gaz / frana, straight to the ESC (see below).
     D-pad stanga/dreapta   -1 / +1 degree on the value currently picked on
                             the page:
                               Mijloc  -> SERVO_STRAIGHT_ANGLE (center point).
@@ -21,6 +22,8 @@ Dreapta (right) - then use the controller:
                                          left lock - stick fully left).
                               Dreapta -> SERVO_MIN_ANGLE (servo angle at full
                                          right lock - stick fully right).
+    [A] / [Y] / [B]        RESUME / PAUZA / STOP - same layout and meaning
+                            as manual_drive.py (see below).
 
 Calibrating Stanga/Dreapta: leave the stick centered and the wheels sit at
 the current middle value, untouched. Hold the stick at that lock (full left
@@ -33,16 +36,29 @@ Starts from whatever is in config/hardware_config.py right now (not a fixed
 page; Reset on the page reverts unsaved edits back to the last saved values
 without restarting this script.
 
-The motor works too, driven the same way as manual_drive.py: the right
-trigger is gas, the left trigger is brake, straight to the ESC pulse (no
-speed regulator) - so you can drive the car around right after calibrating
-without switching scripts. ESC arming follows manual_drive.py's order
-exactly (PWM neutral set up before the relay powers it, then held at the
-arm pulse for ESC_ARM_HOLD_SECONDS) and shuts down the same way (neutral,
-then hard stop, with a rumble confirmation) - see config/servo_esc.py's
-ESC class. Turns the relay on at start and off at exit like every driving
-script, and can't run at the same time as main / data_recorder /
-manual_drive (one script at a time, dashboard-enforced).
+The motor works too, driven the same way as manual_drive.py: RT/LT go
+straight to the ESC pulse (no speed regulator). ESC arming follows
+manual_drive.py's order exactly (PWM neutral set up before the relay
+powers it, then held at the arm pulse for ESC_ARM_HOLD_SECONDS) and shuts
+down the same way on exit (neutral, then hard stop, with a rumble
+confirmation) - see config/servo_esc.py's ESC class.
+
+Safety, all identical to manual_drive.py:
+    [Y] PAUZA   servo -> center, ESC -> neutral, stick/triggers/D-pad all
+                ignored until RESUME - nothing moves or changes, on
+                purpose, so you can hand off the controller or step away.
+    [A] RESUME  only has an effect while paused; picks the drive back up
+                where the stick/target selection currently are.
+    [B] STOP    stops the script (same as the dashboard's Stop button).
+    Controller dropped (Bluetooth) - ESC to neutral immediately, keeps
+                running, retries the connection, resumes on [A] once back
+                (same as main.py's controller-mode recovery).
+    Any other crash - the `finally` block still cuts the relay and neutrals
+                the ESC before the process exits, whatever went wrong.
+
+Turns the relay on at start and off at exit like every driving script, and
+can't run at the same time as main / data_recorder / manual_drive (one
+script at a time, dashboard-enforced).
 
 Usage:
     python3 tools/steering_calibrate.py
@@ -85,6 +101,11 @@ ABS_ANGLE_MIN, ABS_ANGLE_MAX = 1, 179  # stay inside the servo's 0..180 range
 RECONNECT_SECONDS = 0.5
 TICK_SECONDS = 0.02
 
+# Same layout/meaning as manual_drive.py.
+BTN_RESUME = ecodes.BTN_A
+BTN_PAUSE = ecodes.BTN_Y
+BTN_STOP = ecodes.BTN_B
+
 TARGETS = ("middle", "left", "right")
 
 # Which servo lock each page target edits - see steering_axis_to_label()/
@@ -100,6 +121,7 @@ _state = {
     "label": 0.0,
     "angle": SERVO_STRAIGHT_ANGLE,
     "controller_connected": True,
+    "paused": False,
 }
 
 
@@ -176,6 +198,7 @@ def _status_reply(ok=True, error=None):
         "ok": ok, "target": s["target"], "values": s["values"], "saved": s["saved"],
         "dirty": s["values"] != s["saved"], "label": round(s["label"], 2),
         "angle": round(s["angle"], 1), "controller_connected": s["controller_connected"],
+        "paused": s["paused"],
     }
     if error is not None:
         reply["error"] = error
@@ -322,11 +345,12 @@ def main():
         print(f"Calibrare directie pornita. Valori curente: stanga(max)={SERVO_MAX_ANGLE} "
               f"mijloc={SERVO_STRAIGHT_ANGLE} dreapta(min)={SERVO_MIN_ANGLE}")
         print("Alege ce calibrezi pe pagina web. Stick = testeaza virajul, D-pad stanga/dreapta = -1/+1 grad, "
-              "RT/LT = gaz/frana (ca la Manual Drive). Salveaza / Reseteaza tot de pe pagina.")
+              "RT/LT = gaz/frana (ca la Manual Drive). [Y] pauza, [A] reia, [B] opreste.")
 
         last_hat0x = 0
         gas_value = 0
         brake_value = 0
+        is_paused = False
         controller_lost = False
         last_reconnect_try = 0.0
 
@@ -364,30 +388,59 @@ def main():
                     _update_state(controller_connected=False)
                     print(f"Controller pierdut ({e}) - ESC la neutru, astept reconectarea...")
                 for event in events:
-                    if event.type != ecodes.EV_ABS:
-                        continue
-                    if event.code == ecodes.ABS_X:
-                        joystick_x = event.value
-                    elif event.code == ecodes.ABS_HAT0X:
-                        step = 0
-                        if event.value == -1 and last_hat0x == 0:
-                            step = -STEP_DEG
-                        elif event.value == 1 and last_hat0x == 0:
-                            step = STEP_DEG
-                        last_hat0x = event.value
-                        if step:
-                            _adjust(_get_state()["target"], step)
-                    else:
-                        # Same trigger names/formula as manual_drive.py - RT/LT
-                        # on a Bluetooth Xbox pad report as ABS_GAS/ABS_BRAKE.
-                        abs_name = ecodes.ABS.get(event.code)
-                        if abs_name == "ABS_GAS":
-                            gas_value = event.value
-                        elif abs_name == "ABS_BRAKE":
-                            brake_value = event.value
+                    if event.type == ecodes.EV_ABS and not is_paused:
+                        if event.code == ecodes.ABS_X:
+                            joystick_x = event.value
+                        elif event.code == ecodes.ABS_HAT0X:
+                            step = 0
+                            if event.value == -1 and last_hat0x == 0:
+                                step = -STEP_DEG
+                            elif event.value == 1 and last_hat0x == 0:
+                                step = STEP_DEG
+                            last_hat0x = event.value
+                            if step:
+                                _adjust(_get_state()["target"], step)
                         else:
-                            continue
-                        esc.set_pulse_us(ESC.pulse_from_gas_brake(gas_value, brake_value))
+                            # Same trigger names/formula as manual_drive.py -
+                            # RT/LT on a Bluetooth Xbox pad report as
+                            # ABS_GAS/ABS_BRAKE.
+                            abs_name = ecodes.ABS.get(event.code)
+                            if abs_name == "ABS_GAS":
+                                gas_value = event.value
+                            elif abs_name == "ABS_BRAKE":
+                                brake_value = event.value
+                            else:
+                                continue
+                            esc.set_pulse_us(ESC.pulse_from_gas_brake(gas_value, brake_value))
+                    elif event.type == ecodes.EV_ABS and event.code == ecodes.ABS_HAT0X:
+                        last_hat0x = event.value  # keep the edge-tracker in sync while paused
+                    elif event.type == ecodes.EV_KEY and event.value == 1:
+                        if event.code == BTN_RESUME:
+                            if is_paused:
+                                is_paused = False
+                                _update_state(paused=False)
+                                print("\n>>> REIA (A) <<<")
+                                rumble(500)
+                        elif event.code == BTN_PAUSE:
+                            if not is_paused:
+                                is_paused = True
+                                gas_value = brake_value = 0
+                                esc.neutral()
+                                # Center on the *live* straight value, not
+                                # SteeringServo.center()'s SERVO_STRAIGHT_ANGLE
+                                # constant - an unsaved edit to Mijloc must
+                                # still be what the wheels go to on pause.
+                                with _state_lock:
+                                    center_angle = _state["values"]["straight"]
+                                steering.set_angle(center_angle)
+                                _update_state(paused=True, label=0.0, angle=center_angle)
+                                print("\n>>> PAUZA (Y) <<<")
+                                rumble(1000)
+                        elif event.code == BTN_STOP:
+                            raise KeyboardInterrupt
+
+            if is_paused:
+                continue
 
             # Re-applied every tick (not just on a new event) so a D-pad edit
             # while the stick is held at a lock moves the wheel immediately.
@@ -397,10 +450,11 @@ def main():
                 angle = label_to_angle(label, v["min"], v["max"], v["straight"])
             steering.set_angle(angle)
             _update_state(label=label, angle=angle)
-    except ConnectionError as e:
-        print(f"Eroare: {e}")
-    except KeyboardInterrupt:
-        pass
+    except (KeyboardInterrupt, ConnectionError) as e:
+        if isinstance(e, ConnectionError):
+            print(f"\n{e}")
+    except Exception as e:
+        print(f"\nEroare majora neasteptata: {e}")
     finally:
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         relay_cmd("RELAY_OFF")

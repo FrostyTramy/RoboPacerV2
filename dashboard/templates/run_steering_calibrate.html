@@ -3,8 +3,9 @@
 {% block config %}
   <div class="status-line">
     Alege ce calibrezi mai jos, apoi foloseste stick-ul si D-pad-ul stanga/dreapta de pe controller-ul
-    fizic (nu de pe pagina). RT/LT merg ca la Manual Drive (gaz/frana direct pe ESC). Nu poate rula in
-    acelasi timp cu main / data_recorder / manual_drive.
+    fizic (nu de pe pagina). RT/LT merg ca la Manual Drive (gaz/frana direct pe ESC).
+    [A] reia, [Y] pauza (servo la centru, ESC la neutru, toate intrarile ignorate), [B] opreste.
+    Nu poate rula in acelasi timp cu main / data_recorder / manual_drive.
   </div>
 {% endblock %}
 
@@ -28,6 +29,7 @@
     <div class="card"><div class="label">Unghi servo live</div><div class="value" id="calib-angle">--</div></div>
     <div class="card"><div class="label">Stick</div><div class="value" id="calib-label">--</div></div>
     <div class="card"><div class="label">Controller</div><div class="value" id="calib-controller">--</div></div>
+    <div class="card"><div class="label">Stare</div><div class="value" id="calib-state">--</div></div>
   </div>
 
   <button type="button" class="btn" id="calib-save" disabled>Salveaza in config</button>
@@ -80,6 +82,7 @@
       document.getElementById('calib-angle').textContent = '--';
       document.getElementById('calib-label').textContent = '--';
       document.getElementById('calib-controller').innerHTML = '--';
+      document.getElementById('calib-state').innerHTML = '--';
       document.getElementById('calib-save-status').textContent = '';
       return;
     }
@@ -92,6 +95,8 @@
     document.getElementById('calib-label').textContent = data.label.toFixed(2);
     document.getElementById('calib-controller').innerHTML = data.controller_connected
       ? '<span class="badge ok">conectat</span>' : '<span class="badge bad">deconectat</span>';
+    document.getElementById('calib-state').innerHTML = data.paused
+      ? '<span class="badge warn">pauza</span>' : '<span class="badge ok">activ</span>';
     document.getElementById('calib-save-status').textContent = data.dirty ? 'Modificari nesalvate.' : 'Salvat.';
     ['left', 'middle', 'right'].forEach(t =>
       document.getElementById('calib-card-' + t).classList.toggle('active-calib', t === data.target));

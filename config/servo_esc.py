@@ -24,8 +24,14 @@ from config.hardware_config import (
     SERVO_MIN_PULSE,
     SERVO_MAX_PULSE,
     SERVO_STRAIGHT_ANGLE,
+    TRAIN_SPEED_KMH,
     TRANSIENT_I2C_ERRNOS,
 )
+
+# How many "expo" exponents to add per km/h run above TRAIN_SPEED_KMH, and the
+# most it can ever add - see speed_scaled_steering().
+STEERING_EXPO_SPEED_SCALE_KMH = 6.0
+STEERING_EXPO_MAX_EXTRA = 2.0
 
 
 class SteeringServo:
@@ -113,3 +119,22 @@ def steering_label_to_angle(label):
     else:
         angle = SERVO_STRAIGHT_ANGLE - label * (SERVO_MAX_ANGLE - SERVO_STRAIGHT_ANGLE)
     return int(round(angle))
+
+
+def speed_scaled_steering(label, current_kmh):
+    """Damps mid-range steering labels more the faster the car runs above
+    TRAIN_SPEED_KMH (the model's training data speed), while leaving 0
+    (straight) and +-1 (full lock) exactly unchanged - so a genuinely sharp
+    turn can always still get full lock, only the in-between corrections
+    that tend to cause oscillation at speed get pulled toward straight.
+
+    Same idea as an RC transmitter's steering "expo" curve: label**p with
+    p > 1 flattens the response near 0 without touching the endpoints.
+    p grows with how far current_kmh is over TRAIN_SPEED_KMH (capped by
+    STEERING_EXPO_MAX_EXTRA) and is exactly 1 (no-op) at or under it - a
+    run at/under the model's own training speed is never affected."""
+    if current_kmh <= TRAIN_SPEED_KMH or label == 0.0:
+        return label
+    extra = min(STEERING_EXPO_MAX_EXTRA, (current_kmh - TRAIN_SPEED_KMH) / STEERING_EXPO_SPEED_SCALE_KMH)
+    sign = 1.0 if label > 0 else -1.0
+    return sign * min(1.0, abs(label)) ** (1.0 + extra)

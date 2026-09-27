@@ -48,3 +48,14 @@ TRANSIENT_I2C_ERRNOS = (121, 19)
 
 # Wheel/odometry
 WHEEL_CIRCUMFERENCE_M = 0.1369  # diameter 43.58mm, tape-measure calibrated over 200m
+
+# Speed-compensated steering (main.py) - see config/vision.py's
+# speed_scaled_gap_seconds() and config/servo_esc.py's speed_scaled_steering().
+# Training data (data_recorder.py) is recorded at roughly this speed; a model
+# only ever sees that speed's frame-to-frame motion and steering-correction
+# sizes, so running much faster than this is out of its training
+# distribution - a likely cause of oscillation/oversteer at speed. Both
+# compensations are a no-op at or below this speed (nothing changes for a
+# run at/under normal recording speed) and only kick in above it. Update
+# this to roughly how fast you actually drive while recording.
+TRAIN_SPEED_KMH = 3.0

@@ -17,7 +17,15 @@ Two paths produce the Hailo's uint8 input:
 import cv2
 import numpy as np
 
-from config.vision_config import FRAME_STACK_GAP_SECONDS, FRAME_STACK_N, IMAGENET_MEAN, IMAGENET_STD, MODEL_SIZE
+from config.hardware_config import TRAIN_SPEED_KMH
+from config.vision_config import (
+    FRAME_STACK_GAP_SECONDS,
+    FRAME_STACK_MIN_GAP_SECONDS,
+    FRAME_STACK_N,
+    IMAGENET_MEAN,
+    IMAGENET_STD,
+    MODEL_SIZE,
+)
 
 
 def preprocess(frame_bgr):
@@ -54,14 +62,28 @@ def preprocess_quantized(frame_bgr, lut_bgr):
     return cv2.cvtColor(cv2.LUT(small, lut_bgr), cv2.COLOR_BGR2RGB)
 
 
-def select_stack_frames(history, now, frame_stack_n=FRAME_STACK_N):
+def speed_scaled_gap_seconds(current_kmh):
+    """FRAME_STACK_GAP_SECONDS, compressed when running faster than
+    TRAIN_SPEED_KMH so the *distance* between stacked frames - and
+    therefore the apparent motion the model sees - matches training,
+    instead of growing with speed. A no-op at or below TRAIN_SPEED_KMH
+    (running slower than training isn't the reported problem, and it would
+    need looking back further than frame_history is trimmed to keep)."""
+    if current_kmh <= TRAIN_SPEED_KMH:
+        return FRAME_STACK_GAP_SECONDS
+    return max(FRAME_STACK_MIN_GAP_SECONDS, FRAME_STACK_GAP_SECONDS * TRAIN_SPEED_KMH / current_kmh)
+
+
+def select_stack_frames(history, now, frame_stack_n=FRAME_STACK_N, gap_seconds=FRAME_STACK_GAP_SECONDS):
     """The frames of a stack, newest first: history[-1], then for each k the
-    newest one captured at or before now - k * FRAME_STACK_GAP_SECONDS
-    (the oldest available if none is that old yet). history is a
-    time-ordered sequence of (timestamp, frame)."""
+    newest one captured at or before now - k * gap_seconds (the oldest
+    available if none is that old yet). history is a time-ordered sequence
+    of (timestamp, frame). gap_seconds defaults to the constant every
+    training frame was stacked with; main.py passes speed_scaled_gap_seconds()
+    instead so inference matches training regardless of current speed."""
     frames = [history[-1][1]]
     for k in range(1, frame_stack_n):
-        target_ts = now - k * FRAME_STACK_GAP_SECONDS
+        target_ts = now - k * gap_seconds
         best = history[0][1]
         for ts, img in reversed(history):
             if ts <= target_ts:
@@ -71,5 +93,5 @@ def select_stack_frames(history, now, frame_stack_n=FRAME_STACK_N):
     return frames
 
 
-def build_frame_stack(history, now, frame_stack_n=FRAME_STACK_N):
-    return np.concatenate(select_stack_frames(history, now, frame_stack_n), axis=-1)
+def build_frame_stack(history, now, frame_stack_n=FRAME_STACK_N, gap_seconds=FRAME_STACK_GAP_SECONDS):
+    return np.concatenate(select_stack_frames(history, now, frame_stack_n, gap_seconds), axis=-1)

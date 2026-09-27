@@ -56,6 +56,25 @@ moment of the drive (speed AND steering) is written instead to a dense,
 fixed-cadence CSV in logs/, at TICK_INTERVAL_SECONDS.
 
 --------------------------------------------------------------------------
+Speed-compensated steering (train slow, run fast)
+--------------------------------------------------------------------------
+The model only ever sees training data recorded around TRAIN_SPEED_KMH
+(config/hardware_config.py) - running much faster than that puts it out
+of its training distribution (frame-to-frame motion is bigger than it's
+ever seen, and a small heading error needs correcting sooner) and is a
+likely cause of oscillation/oversteer at speed ("snaking"). Above
+TRAIN_SPEED_KMH, two independent compensations kick in automatically -
+both exactly a no-op at or under it:
+  - The frame stack's time gap between images is compressed
+    (speed_scaled_gap_seconds() in config/vision.py) so the *distance*
+    between stacked frames matches training instead of growing with speed.
+  - The steering label gets an "expo" curve applied (speed_scaled_steering()
+    in config/servo_esc.py): 0 and +-1 pass through unchanged (straight
+    stays straight, full lock is always reachable), only the in-between
+    corrections get pulled toward straight, more so the faster you're
+    going. Neither retrains the model nor caps max steering.
+
+--------------------------------------------------------------------------
 Deliberate behavior difference from cruise_control.py
 --------------------------------------------------------------------------
 If the speed sensor goes stale mid-run, this script stops the whole
@@ -143,11 +162,18 @@ from config.cruise_config import (
 )
 from config.ipc_config import MAIN_CONTROL_SOCKET, ODO_STALE_GRACE_SECONDS
 from config.pca9685_init import init_pca9685
-from config.servo_esc import ESC, SteeringServo, steering_label_to_angle
+from config.servo_esc import ESC, SteeringServo, speed_scaled_steering, steering_label_to_angle
 from config.cruise_pi import cruise_pulse_us
 from config.estop import relay_cmd
 from config.odometry import get_rpm, is_odo_stale, odo_reader_loop, rpm_to_kmh
-from config.vision import make_quant_lut, preprocess, preprocess_quantized, quantize_input, select_stack_frames
+from config.vision import (
+    make_quant_lut,
+    preprocess,
+    preprocess_quantized,
+    quantize_input,
+    select_stack_frames,
+    speed_scaled_gap_seconds,
+)
 from config.input_devices import find_xbox_controller
 
 # ---------------------------------------------------------------------------
@@ -688,10 +714,17 @@ def main():
                         now = time.time()
                         if frame_stack_n > 1:
                             frame_history.append((now, cv2.split(img_q)))
+                            # Cutoff uses the base (uncompressed) gap as a safe
+                            # upper bound - speed_scaled_gap_seconds() only ever
+                            # shrinks the gap actually used below, so history is
+                            # never trimmed shorter than the stack could need.
                             cutoff = now - (frame_stack_n - 1) * FRAME_STACK_GAP_SECONDS - 0.5
                             while len(frame_history) > 1 and frame_history[0][0] < cutoff:
                                 frame_history.popleft()
-                            planes = select_stack_frames(frame_history, now, frame_stack_n)
+                            # filtered_kmh is last tick's speed (this tick's isn't
+                            # computed until below) - at 50Hz that lag doesn't matter.
+                            planes = select_stack_frames(
+                                frame_history, now, frame_stack_n, speed_scaled_gap_seconds(filtered_kmh))
                             inp = cv2.merge([p for frame_planes in planes for p in frame_planes])[np.newaxis]
                         else:
                             inp = img_q[np.newaxis]
@@ -702,6 +735,10 @@ def main():
                             steer_cmd = raw_label
                         else:
                             steer_cmd = 0.0 if abs(smooth_label) < STEERING_DEADZONE else smooth_label
+                        # Damp mid-range corrections when running above the
+                        # model's training speed (see config/servo_esc.py) -
+                        # again using last tick's speed; a no-op under it.
+                        steer_cmd = speed_scaled_steering(steer_cmd, filtered_kmh)
 
                         # Steering applies always, regardless of `engaged` -
                         # so the operator can see the model tracking the

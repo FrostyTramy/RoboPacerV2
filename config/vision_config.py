@@ -12,6 +12,7 @@ IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
 FRAME_STACK_N = 3
 FRAME_STACK_GAP_SECONDS = 0.1
+FRAME_STACK_MIN_GAP_SECONDS = 0.02  # never compress the speed-scaled gap below this
 
 SMOOTH_ALPHA = 0.5       # EMA smoothing on the predicted steering label
 STEERING_DEADZONE = 0.06  # |smoothed label| below this is treated as 0

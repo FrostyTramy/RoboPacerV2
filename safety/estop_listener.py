@@ -1,12 +1,21 @@
 """
 RoboPacerV2 - Emergency Stop Listener (simplified)
 ====================================================
-Doua responsabilitati:
+Trei responsabilitati:
   1. Trimite !!HB!! la ESP32 la fiecare 0.5s (watchdog-ul hardware al ESP32
      taie releul daca nu mai primeste heartbeat timp de 2s).
   2. Citeste !!ESTOP!! de la ESP32 si omoara toate procesele Python din
      REPO_ROOT (main/main.py, data_recorder/data_recorder.py etc.) prin
      SIGTERM then SIGKILL.
+  3. Daca portul serial cade brusc CAT TIMP era conectat (adaptorul CH340
+     al ESP32 se deconecteaza de pe USB - observat cu un ESP32 care se
+     re-boot-eaza singur, probabil dintr-un brownout pe alimentarea USB),
+     e tratat exact ca un ESTOP: releul nu mai poate fi verificat (ESP32-ul
+     revine cu releul lui pe OFF dupa un power-on reset - stare confirmata
+     empiric), si un script care crede ca inca conduce fara heartbeat/
+     releu/odometrie ruleaza in gol. Nu se declanseaza la un restart
+     deliberat al serviciului asta (systemctl restart) - doar la o
+     deconectare reala in mijlocul unei sesiuni active.
 
 Pe langa astea, tine o stare partajata (releu/ESP32/watchdog) interogabila
 pe acelasi Unix socket ca RELAY_ON/RELAY_OFF, trimitand "STATUS" - folosita
@@ -311,6 +320,7 @@ def main():
             hb_thread.start()
             logging.info("Heartbeat thread pornit.")
 
+            serial_dropped = False
             try:
                 while True:
                     # Trimite comenzi relay primite de la scripturi Python
@@ -353,14 +363,28 @@ def main():
 
             except (serial.SerialException, OSError) as e:
                 logging.warning(f"Port serial deconectat ({e}) - reconectare in {RECONNECT_SLEEP_SECONDS}s.")
+                serial_dropped = True
             finally:
                 stop_event.set()
                 hb_thread.join(timeout=2)
-                _update_state(esp32_connected=False, watchdog_armed=False)
+                # relay_on is only ever set from an explicit [RELAY] line
+                # below - after a genuine serial drop (not a deliberate
+                # SIGTERM/service restart, which leaves serial_dropped
+                # False) we can no longer trust that value. Empirically the
+                # ESP32 resets its relay GPIO to OFF on its own power-on
+                # reset (the same USB brownout that dropped the port in the
+                # first place), so assume OFF rather than keep reporting a
+                # stale ON - and a script that thinks it's still driving
+                # with no heartbeat/relay/odometry reaching it is running
+                # blind, so treat this exactly like an ESTOP.
+                _update_state(esp32_connected=False, watchdog_armed=False, relay_on=False)
                 try:
                     ser.close()
                 except Exception:
                     pass
+                if serial_dropped:
+                    logging.warning("ESP32 deconectat brusc - tratat ca ESTOP (relay presupus OFF).")
+                    kill_target_processes()
                 time.sleep(RECONNECT_SLEEP_SECONDS)
 
     except KeyboardInterrupt:

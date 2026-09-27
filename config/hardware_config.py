@@ -18,7 +18,7 @@ SERVO_MAX_PULSE = 2200         # microseconds
 # wheel lock needs unequal servo travel.
 SERVO_MIN_ANGLE = 49           # degrees - full lock, label +1
 SERVO_MAX_ANGLE = 135          # degrees - full lock, label -1
-SERVO_STRAIGHT_ANGLE = 94      # degrees - wheels straight, label 0
+SERVO_STRAIGHT_ANGLE = 92      # degrees - wheels straight, label 0
 
 if not SERVO_MIN_ANGLE < SERVO_STRAIGHT_ANGLE < SERVO_MAX_ANGLE:
     raise ValueError("hardware_config: need SERVO_MIN_ANGLE < SERVO_STRAIGHT_ANGLE < SERVO_MAX_ANGLE")
